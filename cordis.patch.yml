@@ -1,0 +1,7 @@
+# Bundle patch layer: this row loads the package's main entry as the host half
+# (a plain Cordis plugin); the `dsh.client` declaration in package.json makes the
+# web app load its ./client bundle as the browser half (sidebar.panellist entry +
+# keyed main panel, the dsh 0.1.7 plugin-panel pattern).
+- insert:
+    - id: perf-lens
+      name: dsh-perf-lens

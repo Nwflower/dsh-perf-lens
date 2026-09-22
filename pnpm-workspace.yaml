@@ -1,0 +1,21 @@
+# pnpm 11 reads project settings from this file. The harness peer graph must never
+# be auto-installed: the plugin targets the installed DSH baseline via peerDependencies,
+# and the registry's `latest` tag for these packages is a broken 0.0.1-rc.1 line.
+autoInstallPeers: false
+# Native build scripts of the harness toolchain are irrelevant to this plugin, which
+# ships no native code; ignore them instead of failing the install.
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  koffi: false
+  node-pty: false
+  protobufjs: false
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/cordis@4.0.4'
+  - '@deepseek-ai/cosmokit@1.8.4 || 1.8.5'
+  - '@deepseek-ai/dsh-client-locale@0.1.7-alpha.1'
+  - '@deepseek-ai/dsh-client-ui-layout@0.1.7-alpha.1'
+  - '@deepseek-ai/dsh-client-ui-primitives@0.1.7-alpha.1'
+  - '@deepseek-ai/dsh-client-ui-sidebar@0.1.7-alpha.1'
+  - '@deepseek-ai/dsh-client-ui-slots@0.1.7-alpha.1'
+  - '@deepseek-ai/schemastery@3.18.3'
