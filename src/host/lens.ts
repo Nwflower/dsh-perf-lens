@@ -11,6 +11,7 @@ import { DEFAULTS } from '../shared/defaults'
 import { attributeFrameList, ownerKey, tallySamples, type OwnerIndex } from './attribute'
 import type { HistoryStore } from './history'
 import type { IoTracker } from './io-tracker'
+import { aggregateHotspots, type HotspotStore } from './hotspots'
 import type { GlobalMetrics } from './metrics'
 import type { HeapNode, Sampler } from './sampler'
 
@@ -49,6 +50,11 @@ export interface LensDeps {
   readonly io: IoTracker
   readonly metrics: GlobalMetrics
   readonly history: HistoryStore
+  /**
+   * In-memory hot-function table. Optional so attribution-only tests do not
+   * need it, and never persisted (docs/design.md §7).
+   */
+  readonly hotspots?: HotspotStore
   /** Installed plugins, from ctx.loader.entries(). */
   readonly plugins: () => readonly PluginFacts[]
   /** Current path-prefix owner index. */
@@ -287,6 +293,15 @@ export class Lens {
       rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, io, activeSamples))
     }
     this.#lastOwnerKeys = [...cpuCounts.keys()]
+    // Hot functions are a deep-mode extra and frame-level data: they go to the
+    // in-memory store only, never into the snapshot that history persists.
+    if (this.#deep && cpu !== null) {
+      this.#deps.hotspots?.replace(
+        aggregateHotspots(cpu.samples, cpu.nodes, index, this.#options.cpuIntervalUs / 1000),
+      )
+    } else {
+      this.#deps.hotspots?.clear()
+    }
     const denominator = activeSamples === 0 ? 1 : activeSamples
     return {
       windowStartedAt: startedAt,

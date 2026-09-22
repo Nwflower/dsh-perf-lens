@@ -1,7 +1,7 @@
 // The /api-perf surface: JSON bodies, query parsing, and disposer semantics.
 
 import { describe, expect, test, vi } from 'vitest'
-import { historyQueryOf, readJsonBody, registerPerfRoutes, statsRangeOf, type RouteRegistrar } from '../src/host/routes'
+import { historyQueryOf, hotspotsQueryOf, readJsonBody, registerPerfRoutes, statsRangeOf, type RouteRegistrar } from '../src/host/routes'
 import type { PerfSnapshot, PerfStats } from '../src/shared/contract'
 
 const SNAPSHOT: PerfSnapshot = {
@@ -45,6 +45,7 @@ function harness() {
     stats: vi.fn((): PerfStats => ({
       range: '24h', since: 0, windowCount: 0, sampledWindowMs: 0, coverage: 0, plugins: [],
     })),
+    hotspots: vi.fn(() => null),
     diagnostics: vi.fn(() => ({
       lastError: null, windowStartedAt: 1, sampleCount: 9,
       ownerKeys: ['plugin:a'], ownerRules: [{ kind: 'plugin', name: 'a', prefix: '/a/' }],
@@ -61,6 +62,7 @@ describe('registerPerfRoutes', () => {
       '/api-perf/control',
       '/api-perf/diagnostics',
       '/api-perf/history',
+      '/api-perf/hotspots',
       '/api-perf/snapshot',
       '/api-perf/stats',
     ])
@@ -105,6 +107,14 @@ describe('registerPerfRoutes', () => {
     expect(h.service.history).toHaveBeenCalledWith({ plugin: 'dsh-context', since: 100 })
   })
 
+  test('hotspots forwards the plugin query and answers null when empty', () => {
+    const h = harness()
+    const { res, captured } = fakeRes()
+    h.handlers.get('/api-perf/hotspots')?.(fakeReq('/api-perf/hotspots?plugin=dsh-context'), res)
+    expect(h.service.hotspots).toHaveBeenCalledWith('dsh-context')
+    expect(JSON.parse(captured.body)).toEqual({ plugin: 'dsh-context', hotspots: null })
+  })
+
   test('stats forwards the range query, defaulting to 24h', () => {
     const h = harness()
     const { res, captured } = fakeRes()
@@ -128,5 +138,9 @@ describe('request parsing helpers', () => {
   test('stats range defaults to 24h', () => {
     expect(statsRangeOf(fakeReq('/api-perf/stats') as never)).toBe('24h')
     expect(statsRangeOf(fakeReq('/api-perf/stats?range=1h') as never)).toBe('1h')
+  })
+
+  test('hotspots plugin defaults to empty', () => {
+    expect(hotspotsQueryOf(fakeReq('/api-perf/hotspots') as never)).toBe('')
   })
 })

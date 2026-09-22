@@ -3,6 +3,7 @@
 
 import { describe, expect, test, vi } from 'vitest'
 import { createOwnerIndex, type ProfileNode } from '../src/host/attribute'
+import { HotspotStore } from '../src/host/hotspots'
 import { continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, type LensDeps } from '../src/host/lens'
 import type { Sampler } from '../src/host/sampler'
 import type { PerfSnapshot } from '../src/shared/contract'
@@ -85,6 +86,20 @@ describe('Lens.runWindow', () => {
     expect(snapshot.unattributedShare).toBe(0)
     expect(snapshot.global.sampleCount).toBe(260)
     expect(h.records).toHaveLength(1)
+  })
+
+  test('collects hot functions only in deep mode and clears them when it is off', async () => {
+    const h = makeHarness()
+    const store = new HotspotStore()
+    const lens = new Lens({ ...h.deps, hotspots: store })
+    await lens.runWindow()
+    expect(store.get('pluginA')).toBeNull()
+    lens.setDeep(true)
+    await lens.runWindow()
+    expect(store.get('pluginA')).not.toBeNull()
+    lens.setDeep(false)
+    await lens.runWindow()
+    expect(store.get('pluginA')).toBeNull()
   })
 
   test('carries exact fs operation counts and the window length', async () => {

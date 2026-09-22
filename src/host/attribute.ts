@@ -37,6 +37,8 @@ export interface OwnerIndex {
 export interface FrameLike {
   readonly url?: string | undefined
   readonly functionName?: string | undefined
+  /** 1-based source line, used only for hotspot grouping. */
+  readonly lineNumber?: number | undefined
 }
 
 /** One node of a CPU profile or heap-sampling tree, as far as attribution needs. */

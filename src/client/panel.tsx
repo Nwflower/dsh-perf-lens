@@ -7,7 +7,7 @@
 // on an explicit range change instead of every snapshot poll.
 
 import { useEffect, useRef, useState } from 'react'
-import type { PerfRange, PerfSnapshot, PerfStats } from '../shared/contract'
+import type { Hotspot, PerfRange, PerfSnapshot, PerfStats } from '../shared/contract'
 import { DEFAULTS, RANGE_MS } from '../shared/defaults'
 import { createPerfApi, type PerfApi } from './api'
 import { ControlBar } from './control-bar'
@@ -41,6 +41,8 @@ export function PerfPanel({ api }: PerfPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [deep, setDeep] = useState(false)
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const [hotspots, setHotspots] = useState<Readonly<Record<string, readonly Hotspot[]>>>({})
 
   const pollMs = snapshot?.mode === 'continuous' ? DEFAULTS.continuousWindowMs : DEFAULTS.windowMs
 
@@ -95,6 +97,25 @@ export function PerfPanel({ api }: PerfPanelProps) {
     }
   }, [client, range])
 
+  const toggleHotspots = (moduleName: string): void => {
+    setExpanded(previous => {
+      const next = new Set(previous)
+      if (next.has(moduleName)) {
+        next.delete(moduleName)
+        return next
+      }
+      next.add(moduleName)
+      return next
+    })
+    // Fetch lazily; frame-level data is only available after a deep-mode window.
+    if (hotspots[moduleName] === undefined) {
+      void client.hotspots(moduleName).then(
+        response => { if (response.hotspots !== null) setHotspots(previous => ({ ...previous, [moduleName]: response.hotspots ?? [] })) },
+        () => { /* the detail row already says data is unavailable */ },
+      )
+    }
+  }
+
   const send = async (body: Parameters<PerfApi['control']>[0]): Promise<void> => {
     setBusy(true)
     try {
@@ -127,10 +148,18 @@ export function PerfPanel({ api }: PerfPanelProps) {
         onToggleDeep={() => {
           const next = !deep
           setDeep(next)
+          if (!next) setHotspots({})
           void send({ deep: next })
         }}
       />
-      <MetricsTable rows={snapshot.plugins} series={series} coverageThreshold={DEFAULTS.coverageWarnThreshold} />
+      <MetricsTable
+        rows={snapshot.plugins}
+        series={series}
+        coverageThreshold={DEFAULTS.coverageWarnThreshold}
+        expanded={expanded}
+        hotspots={hotspots}
+        onToggle={toggleHotspots}
+      />
       <div style={section}>
         <div style={sectionHead}>
           <strong>{t('trend')}</strong>

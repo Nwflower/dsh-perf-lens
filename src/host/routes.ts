@@ -6,6 +6,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot, PerfStats } from '../shared/contract'
+import type { Hotspot } from '../shared/contract'
 
 /** The route registrar the harness webServer service exposes. */
 export interface RouteRegistrar {
@@ -23,7 +24,18 @@ export interface PerfService {
   history(query: PerfHistoryQuery): readonly PerfSnapshot[]
   /** Range aggregation over recorded windows; range is 1h | 24h | 7d. */
   stats(range: string): PerfStats
+  /**
+   * Hot functions for one plugin. In-memory only and available only after a
+   * deep-mode window; null when nothing was collected.
+   */
+  hotspots(plugin: string): readonly Hotspot[] | null
   diagnostics(): PerfDiagnostics
+}
+
+/** Extract the plugin query from the request URL. */
+export function hotspotsQueryOf(req: IncomingMessage): string {
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  return url.searchParams.get('plugin') ?? ''
 }
 
 /** Extract the range query from the request URL. */
@@ -109,6 +121,18 @@ export function registerPerfRoutes(ws: RouteRegistrar, service: PerfService): ()
       handler: (req, res) => {
         try {
           respond(res, 200, service.stats(statsRangeOf(req)))
+        } catch (error) {
+          respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }),
+    ws.register({
+      kind: 'exact',
+      path: '/api-perf/hotspots',
+      handler: (req, res) => {
+        try {
+          const plugin = hotspotsQueryOf(req)
+          respond(res, 200, { plugin, hotspots: service.hotspots(plugin) })
         } catch (error) {
           respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }

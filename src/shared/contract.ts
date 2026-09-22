@@ -124,6 +124,25 @@ export interface PluginStatsRow {
   readonly windows: number
 }
 
+/**
+ * One hot function for a plugin. Frame-level data: in-memory only, collected
+ * only in deep mode, and NEVER persisted (docs/design.md §7).
+ */
+export interface Hotspot {
+  readonly functionName: string
+  readonly url: string
+  readonly lineNumber: number
+  readonly selfMs: number
+  readonly samples: number
+}
+
+/** Response of GET /api-perf/hotspots?plugin=... */
+export interface HotspotResponse {
+  readonly plugin: string
+  /** null when no deep-mode window has collected any yet. */
+  readonly hotspots: readonly Hotspot[] | null
+}
+
 /** Response of GET /api-perf/stats. */
 export interface PerfStats {
   readonly range: PerfRange

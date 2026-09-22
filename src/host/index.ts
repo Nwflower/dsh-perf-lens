@@ -16,6 +16,7 @@ import type { PerfControlRequest } from '../shared/contract'
 import { DEFAULTS } from '../shared/defaults'
 import type { HostCtx, HostWebCtx } from './ctx'
 import { HistoryStore } from './history'
+import { HotspotStore } from './hotspots'
 import { IoTracker } from './io-tracker'
 import { DEFAULT_LENS_OPTIONS, Lens, type PluginFacts } from './lens'
 import { GlobalMetrics } from './metrics'
@@ -108,6 +109,8 @@ export function apply(rawCtx: Context): void {
   })
   const io = new IoTracker()
   const metrics = new GlobalMetrics()
+  // Frame-level, in-memory only: this table has no persistence path by design.
+  const hotspots = new HotspotStore()
   const history = new HistoryStore({
     dir: historyDirOf(),
     retentionDays: 14,
@@ -139,6 +142,7 @@ export function apply(rawCtx: Context): void {
       io,
       metrics,
       history,
+      hotspots,
       plugins,
       ownerIndex: () => buildOwnerIndex(factsOf(), { harnessPrefix }),
     },
@@ -168,6 +172,7 @@ export function apply(rawCtx: Context): void {
         const resolved = rangeToSince(range, now)
         return aggregateStats(history.read(resolved.since), resolved.range, resolved.since, now)
       },
+      hotspots: (plugin) => hotspots.get(plugin),
       diagnostics: () => lens.diagnostics(),
     })
     ctx.effect(() => dispose)

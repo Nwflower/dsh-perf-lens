@@ -44,6 +44,9 @@ const DICT = {
   refresh: '刷新',
   noTrend: '趋势数据不足（至少两个窗口）',
   hiddenZero: '已隐藏占用 < 阈值 的插件',
+  hotspot: '热点函数（self 时间）',
+  hotspotNone: '暂无热点数据（需开启深度模式并等待一个窗口）',
+  selfTime: 'self',
 } as const
 
 export type MessageKey = keyof typeof DICT
