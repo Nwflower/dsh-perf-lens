@@ -2,7 +2,7 @@
 // metric that has no value.
 
 import { describe, expect, test } from 'vitest'
-import { formatBytes, formatMs, formatOps, formatPercent } from '../src/client/format'
+import { formatBytes, formatMs, formatOps, formatPercent, formatTimeOfDay } from '../src/client/format'
 
 describe('formatBytes', () => {
   test('scales to the largest unit', () => {
@@ -22,6 +22,14 @@ describe('formatPercent', () => {
     expect(formatPercent(0.5)).toBe('50.0%')
     expect(formatPercent(0.0123)).toBe('1.23%')
     expect(formatPercent(0)).toBe('0%')
+  })
+})
+
+describe('formatTimeOfDay', () => {
+  test('renders local HH:mm for axis labels', () => {
+    // Constructed from local components, so the expectation is timezone-independent.
+    expect(formatTimeOfDay(new Date(2026, 0, 1, 9, 5).getTime())).toBe('09:05')
+    expect(formatTimeOfDay(Number.NaN)).toBe('—')
   })
 })
 

@@ -8,6 +8,13 @@
 import type { ClientVitals } from '../shared/contract'
 import { percentile } from '../shared/math'
 
+/**
+ * A frame gap this large means the tab was hidden (rAF is paused in hidden
+ * tabs), not that one frame took seconds. Keeping it would poison the p95
+ * with a visibility artifact, so such gaps are dropped.
+ */
+export const MAX_FRAME_GAP_MS = 2000
+
 /** Fold one window of raw observations into a report. Pure and testable. */
 export function summarizeVitals(
   longTaskDurations: readonly number[],
@@ -15,7 +22,7 @@ export function summarizeVitals(
   windowMs: number,
   at: number,
 ): ClientVitals {
-  const sorted = [...rafGaps].sort((a, b) => a - b)
+  const sorted = rafGaps.filter(gap => gap <= MAX_FRAME_GAP_MS).sort((a, b) => a - b)
   return {
     longTaskCount: longTaskDurations.length,
     longTaskTotalMs: longTaskDurations.reduce((total, duration) => total + duration, 0),

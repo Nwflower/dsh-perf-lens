@@ -27,3 +27,12 @@ export function formatOps(reads: number, writes: number): string {
   if (reads === 0 && writes === 0) return '—'
   return `${reads} / ${writes}`
 }
+
+/** Local HH:mm for trend-chart axis labels; date parts would drown a sparkline-scale axis. */
+export function formatTimeOfDay(epochMs: number): string {
+  if (!Number.isFinite(epochMs)) return '—'
+  const date = new Date(epochMs)
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}

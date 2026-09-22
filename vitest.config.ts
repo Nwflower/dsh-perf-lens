@@ -17,7 +17,8 @@ export default defineConfig({
         test: {
           name: 'client',
           environment: 'jsdom',
-          include: ['test/client/**/*.test.tsx'],
+          // *.ts too: pure client helpers (vitals, trend series) are not tsx.
+          include: ['test/client/**/*.test.{ts,tsx}'],
         },
       },
     ],

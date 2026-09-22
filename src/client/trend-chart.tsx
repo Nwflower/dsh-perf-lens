@@ -7,7 +7,7 @@
 // zero lines that answer nothing.
 
 import type { PerfSnapshot } from '../shared/contract'
-import { formatPercent } from './format'
+import { formatPercent, formatTimeOfDay } from './format'
 import { t } from './i18n'
 
 /** Stable line colors; wraps if there are more visible plugins than entries. */
@@ -37,7 +37,8 @@ export function buildSeries(snapshots: readonly PerfSnapshot[]): Series[] {
 }
 
 export function TrendChart({ snapshots, hideThreshold, width = 660, height = 170 }: TrendChartProps) {
-  const series = buildSeries(snapshots)
+  const ordered = [...snapshots].sort((a, b) => a.windowStartedAt - b.windowStartedAt)
+  const series = buildSeries(ordered)
   const visible = series.filter(item => Math.max(...item.values, 0) >= hideThreshold)
   if (snapshots.length < 2 || visible.length === 0) {
     return <div style={{ opacity: 0.6 }}>{t('noTrend')}</div>
@@ -63,6 +64,12 @@ export function TrendChart({ snapshots, hideThreshold, width = 660, height = 170
         <line x1={padLeft} y1={padTop + plotHeight} x2={width - padRight} y2={padTop + plotHeight} stroke="currentColor" strokeOpacity="0.25" />
         <text x={4} y={padTop + 8} fontSize="9" fill="currentColor" opacity="0.7">{formatPercent(yMax)}</text>
         <text x={4} y={padTop + plotHeight} fontSize="9" fill="currentColor" opacity="0.7">0%</text>
+        <text x={padLeft} y={height - 4} fontSize="9" fill="currentColor" opacity="0.7">
+          {formatTimeOfDay(ordered[0]?.windowStartedAt ?? NaN)}
+        </text>
+        <text x={width - padRight} y={height - 4} fontSize="9" fill="currentColor" opacity="0.7" textAnchor="end">
+          {formatTimeOfDay(ordered[ordered.length - 1]?.windowStartedAt ?? NaN)}
+        </text>
         {visible.map((item, index) => (
           <polyline
             key={item.name}
