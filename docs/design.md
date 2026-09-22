@@ -333,6 +333,7 @@ functionName 为 `(idle)`（实测：空闲 3s 的 1716 个样本里 1715 个如
 | /api-perf/control | POST | pause / resume / mode: continuous \| duty / deep / shallow，立即生效 | v1 |
 | /api-perf/history?plugin=&since= | GET | 时序查询（环状缓冲 + JSONL） | v1 |
 | /api-perf/stats?range=1h\|24h\|7d | GET | 范围聚合：每插件 avg/peak/p95/累计核时/覆盖率 | v1 |
+| /api-perf/trend?range=1h\|24h\|7d | GET | 趋势图专用**紧凑序列**：按桶平均降采样到 ≤120 点，每插件只留 cpuShare | v1 |
 | /api-perf/hotspots?plugin= | GET | 每插件热点函数 Top-N；仅深度模式、内存驻留 | v1 |
 | /api-perf/vitals | GET/POST | 前台卡顿上报与读取；POST body 校验后入内存环 | v1 |
 | /api-perf/export | GET | 报告导出（JSON / Markdown） | Phase 2 |
@@ -451,4 +452,6 @@ node:fs 加载钩子字节级磁盘 I/O + 子进程采样（dsh-subprocess-local
 | 9 | 前台卡顿归因 | 浏览器无法把 longtask 归因到插件 bundle，只呈现与 host CPU 的**时间相关性**，UI 常驻「相关性≠因果」 |
 | 10 | 热点函数持久化 | **永不落盘**（帧级数据，§7 红线）；仅内存驻留、仅深度模式、关闭即清空 |
 | 11 | 热点函数 sourcemap | 不做；实测 host 侧第三方包基本无 map，原始 functionName + file:line 已可用 |
+| 12 | 趋势图数据源 | **专用 /api-perf/trend 紧凑序列**，不复用 /api-perf/history：实测 24h 全量快照 31.5MB/次轮询，紧凑序列 119KB（259×），且按桶平均降采样保峰值 |
+| 13 | 面板布局 | 趋势图与积分榜置于插件表**上方**，插件表限高 48vh 滚动：真实宿主 200+ 插件，表格会把趋势顶到数千像素之下 |
 

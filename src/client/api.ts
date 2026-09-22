@@ -1,13 +1,14 @@
 // Browser side of the /api-perf contract. All response types come from
 // src/shared/contract.ts, the same module the host collector writes.
 
-import type { ClientVitals, HotspotResponse, PerfControlRequest, PerfHistoryQuery, PerfRange, PerfSnapshot, PerfStats, VitalsView } from '../shared/contract'
+import type { ClientVitals, HotspotResponse, PerfControlRequest, PerfHistoryQuery, PerfRange, PerfSnapshot, PerfStats, PerfTrend, VitalsView } from '../shared/contract'
 
 export interface PerfApi {
   snapshot(): Promise<PerfSnapshot>
   control(body: PerfControlRequest): Promise<PerfSnapshot>
   history(query?: PerfHistoryQuery): Promise<readonly PerfSnapshot[]>
   stats(range: PerfRange): Promise<PerfStats>
+  trend(range: PerfRange): Promise<PerfTrend>
   hotspots(plugin: string): Promise<HotspotResponse>
   vitals(): Promise<VitalsView>
   postVitals(report: ClientVitals): Promise<VitalsView>
@@ -41,6 +42,9 @@ export function createPerfApi(fetchImpl: typeof fetch = fetch): PerfApi {
     },
     async stats(range) {
       return await readJson<PerfStats>(await fetchImpl(`/api-perf/stats?range=${range}`))
+    },
+    async trend(range) {
+      return await readJson<PerfTrend>(await fetchImpl(`/api-perf/trend?range=${range}`))
     },
     async hotspots(plugin) {
       return await readJson<HotspotResponse>(await fetchImpl(`/api-perf/hotspots?plugin=${encodeURIComponent(plugin)}`))

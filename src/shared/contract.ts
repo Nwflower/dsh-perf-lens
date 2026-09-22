@@ -182,6 +182,33 @@ export interface PerfStats {
   readonly plugins: readonly PluginStatsRow[]
 }
 
+/** One plugin's CPU-share line over the trend's points. */
+export interface PerfTrendSeries {
+  readonly moduleName: string
+  /** One averaged share per point, aligned with PerfTrend.times. */
+  readonly shares: readonly number[]
+}
+
+/**
+ * Compact time series for the trend chart.
+ *
+ * Deliberately NOT a list of full snapshots: a 24h range over 200+ plugins is
+ * tens of megabytes of mostly-unused metric columns, and the chart needs only
+ * window time plus one share per plugin. Points are bucket-averaged host-side,
+ * so the payload stays bounded no matter how much history accumulated.
+ */
+export interface PerfTrend {
+  readonly range: PerfRange
+  /** Epoch milliseconds the range starts at. */
+  readonly since: number
+  /** Point timestamps, oldest first. */
+  readonly times: readonly number[]
+  /** Sorted by peak share descending, so the biggest consumers draw first. */
+  readonly series: readonly PerfTrendSeries[]
+  /** Windows folded into the points, before downsampling. */
+  readonly windowCount: number
+}
+
 /** One resolved owner rule, for troubleshooting attribution. */
 export interface OwnerRuleView {
   readonly kind: string

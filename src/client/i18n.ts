@@ -10,6 +10,7 @@ const DICT = {
   alloc: '分配速率',
   coverage: '覆盖度',
   plugin: '插件',
+  plugins: '插件明细',
   rss: 'RSS',
   heap: '堆',
   lag: '事件循环延迟 p99',

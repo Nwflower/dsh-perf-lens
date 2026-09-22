@@ -29,6 +29,11 @@ export const DEFAULTS = {
    * a plugin that merely idled is not drawn as a flat line.
    */
   trendHideThreshold: 0.005,
+  /**
+   * Ceiling on trend-chart points. A chart a few hundred pixels wide cannot show
+   * more, and every extra point costs payload and render time.
+   */
+  trendMaxPoints: 120,
   /** Vitals reporting window; roughly one sampling window. */
   vitalsWindowMs: 5_000,
   /** Foreground reports kept for the mini-trend. */

@@ -5,7 +5,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { PerfApi } from '../../src/client/api'
 import { PerfPanel } from '../../src/client/panel'
-import type { PerfSnapshot, PerfStats } from '../../src/shared/contract'
+import type { PerfSnapshot, PerfStats, PerfTrend } from '../../src/shared/contract'
 
 const SNAPSHOT: PerfSnapshot = {
   windowStartedAt: 1,
@@ -32,12 +32,18 @@ const STATS: PerfStats = {
   }],
 }
 
+const TREND: PerfTrend = {
+  range: '24h', since: 0, times: [1000, 2000], windowCount: 2,
+  series: [{ moduleName: 'pluginA', shares: [0.4, 0.5] }],
+}
+
 function apiOf(snapshot: PerfSnapshot): PerfApi {
   return {
     snapshot: vi.fn(async () => snapshot),
     control: vi.fn(async () => snapshot),
     history: vi.fn(async () => [snapshot]),
     stats: vi.fn(async () => STATS),
+    trend: vi.fn(async () => TREND),
     hotspots: vi.fn(async () => ({ plugin: 'pluginA', hotspots: null })),
     vitals: vi.fn(async () => ({ latest: null, recent: [] })),
     postVitals: vi.fn(async () => ({ latest: null, recent: [] })),
@@ -60,6 +66,7 @@ describe('PerfPanel', () => {
       control: vi.fn(async () => SNAPSHOT),
       history: vi.fn(async () => []),
       stats: vi.fn(async () => STATS),
+      trend: vi.fn(async () => TREND),
       hotspots: vi.fn(async () => ({ plugin: 'pluginA', hotspots: null })),
       vitals: vi.fn(async () => ({ latest: null, recent: [] })),
       postVitals: vi.fn(async () => ({ latest: null, recent: [] })),

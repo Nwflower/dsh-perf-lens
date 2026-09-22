@@ -2,7 +2,7 @@
 
 import { describe, expect, test, vi } from 'vitest'
 import { historyQueryOf, hotspotsQueryOf, readJsonBody, registerPerfRoutes, statsRangeOf, type RouteRegistrar } from '../src/host/routes'
-import type { PerfSnapshot, PerfStats } from '../src/shared/contract'
+import type { PerfSnapshot, PerfStats, PerfTrend } from '../src/shared/contract'
 
 const SNAPSHOT: PerfSnapshot = {
   windowStartedAt: 1, mode: 'duty',
@@ -46,6 +46,9 @@ function harness() {
     stats: vi.fn((): PerfStats => ({
       range: '24h', since: 0, windowCount: 0, sampledWindowMs: 0, coverage: 0, plugins: [],
     })),
+    trend: vi.fn((): PerfTrend => ({
+      range: '24h', since: 0, times: [], series: [], windowCount: 0,
+    })),
     hotspots: vi.fn(() => null),
     vitals: vi.fn(() => ({ latest: null, recent: [] })),
     recordVitals: vi.fn(() => ({ latest: null, recent: [] })),
@@ -68,6 +71,7 @@ describe('registerPerfRoutes', () => {
       '/api-perf/hotspots',
       '/api-perf/snapshot',
       '/api-perf/stats',
+      '/api-perf/trend',
       '/api-perf/vitals',
     ])
     h.dispose()
@@ -109,6 +113,16 @@ describe('registerPerfRoutes', () => {
     const { res } = fakeRes()
     h.handlers.get('/api-perf/history')?.(fakeReq('/api-perf/history?plugin=dsh-context&since=100'), res)
     expect(h.service.history).toHaveBeenCalledWith({ plugin: 'dsh-context', since: 100 })
+  })
+
+  test('trend forwards the range query, defaulting to 24h', () => {
+    const h = harness()
+    const { res, captured } = fakeRes()
+    h.handlers.get('/api-perf/trend')?.(fakeReq('/api-perf/trend?range=1h'), res)
+    expect(h.service.trend).toHaveBeenCalledWith('1h')
+    expect(captured.status).toBe(200)
+    h.handlers.get('/api-perf/trend')?.(fakeReq('/api-perf/trend'), fakeRes().res)
+    expect(h.service.trend).toHaveBeenLastCalledWith('24h')
   })
 
   test('hotspots forwards the plugin query and answers null when empty', () => {

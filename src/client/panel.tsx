@@ -2,13 +2,17 @@
 // active sampling window (continuous mode polls faster), keeps a short local
 // CPU series for the sparklines, and forwards control toggles to the host.
 //
-// The trend and scoreboard read the recorded history/stats endpoints, which are
+// The trend and scoreboard read the compact trend/stats endpoints, which are
 // heavier (JSONL aggregation), so they refresh on their own slower cadence and
 // on an explicit range change instead of every snapshot poll.
+//
+// Layout order is deliberate: the trend and the scoreboard sit ABOVE the plugin
+// table. A real host loads 200+ plugins, and a table that tall would push the
+// trend thousands of pixels below the fold.
 
 import { useEffect, useRef, useState } from 'react'
-import type { Hotspot, PerfRange, PerfSnapshot, PerfStats, VitalsView } from '../shared/contract'
-import { DEFAULTS, RANGE_MS } from '../shared/defaults'
+import type { Hotspot, PerfRange, PerfSnapshot, PerfStats, PerfTrend, VitalsView } from '../shared/contract'
+import { DEFAULTS } from '../shared/defaults'
 import { createPerfApi, type PerfApi } from './api'
 import { ControlBar } from './control-bar'
 import { GlobalBar } from './global-bar'
@@ -38,7 +42,7 @@ export function PerfPanel({ api }: PerfPanelProps) {
   const [series, setSeries] = useState<Record<string, number[]>>({})
   const [range, setRange] = useState<PerfRange>('24h')
   const [stats, setStats] = useState<PerfStats | null>(null)
-  const [history, setHistory] = useState<readonly PerfSnapshot[]>([])
+  const [trend, setTrend] = useState<PerfTrend | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [deep, setDeep] = useState(false)
@@ -79,14 +83,13 @@ export function PerfPanel({ api }: PerfPanelProps) {
     let cancelled = false
     const load = async (): Promise<void> => {
       try {
-        const since = Date.now() - RANGE_MS[range]
-        const [nextStats, nextHistory] = await Promise.all([
+        const [nextStats, nextTrend] = await Promise.all([
           client.stats(range),
-          client.history({ since }),
+          client.trend(range),
         ])
         if (cancelled) return
         setStats(nextStats)
-        setHistory(nextHistory)
+        setTrend(nextTrend)
       } catch {
         // The trend is an enhancement; a failed read must not blank the live board.
       }
@@ -204,14 +207,6 @@ export function PerfPanel({ api }: PerfPanelProps) {
           </div>
         ) : null}
       </div>
-      <MetricsTable
-        rows={snapshot.plugins}
-        series={series}
-        coverageThreshold={DEFAULTS.coverageWarnThreshold}
-        expanded={expanded}
-        hotspots={hotspots}
-        onToggle={toggleHotspots}
-      />
       <div style={section}>
         <div style={sectionHead}>
           <strong>{t('trend')}</strong>
@@ -226,7 +221,9 @@ export function PerfPanel({ api }: PerfPanelProps) {
             </button>
           ))}
         </div>
-        <TrendChart snapshots={history} hideThreshold={DEFAULTS.trendHideThreshold} />
+        {trend === null
+          ? <div style={{ opacity: 0.6 }}>{t('noTrend')}</div>
+          : <TrendChart trend={trend} hideThreshold={DEFAULTS.trendHideThreshold} />}
       </div>
       {stats !== null && stats.plugins.length > 0 ? (
         <div style={section}>
@@ -234,6 +231,17 @@ export function PerfPanel({ api }: PerfPanelProps) {
           <Scoreboard stats={stats} />
         </div>
       ) : null}
+      <div style={section}>
+        <div style={sectionHead}><strong>{t('plugins')}</strong></div>
+        <MetricsTable
+          rows={snapshot.plugins}
+          series={series}
+          coverageThreshold={DEFAULTS.coverageWarnThreshold}
+          expanded={expanded}
+          hotspots={hotspots}
+          onToggle={toggleHotspots}
+        />
+      </div>
       {error !== null ? <div style={{ opacity: 0.7 }}>{error}</div> : null}
     </div>
   )

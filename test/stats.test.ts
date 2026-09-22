@@ -2,7 +2,7 @@
 // coverage-scaled estimate. Pure functions, so the numbers are locked exactly.
 
 import { describe, expect, test } from 'vitest'
-import { aggregateStats, percentile, rangeToSince } from '../src/host/stats'
+import { aggregateStats, aggregateTrend, percentile, rangeToSince } from '../src/host/stats'
 import type { PerfSnapshot, PluginMetricRow } from '../src/shared/contract'
 
 function row(moduleName: string, cpuShare: number, cpuSelfMs: number): PluginMetricRow {
@@ -103,3 +103,40 @@ describe('aggregateStats', () => {
     expect(stats).toMatchObject({ windowCount: 0, sampledWindowMs: 0, coverage: 0, plugins: [] })
   })
 })
+describe('aggregateTrend', () => {
+  test('averages each bucket and keeps every plugin name', () => {
+    const snapshots = [
+      snapshot(1000, 5000, [row('a', 0.10, 1), row('b', 0.30, 3)]),
+      snapshot(2000, 5000, [row('a', 0.20, 2)]),
+      snapshot(3000, 5000, [row('a', 0.60, 6)]),
+      snapshot(4000, 5000, [row('a', 0.80, 8)]),
+    ]
+    // Two points: windows [0,1] and [2,3].
+    const trend = aggregateTrend(snapshots, '24h', 0, 2)
+    expect(trend.windowCount).toBe(4)
+    expect(trend.times).toEqual([1000, 3000])
+    const a = trend.series.find(s => s.moduleName === 'a')
+    // Bucket 0: (0.10 + 0.20) / 2; bucket 1: (0.60 + 0.80) / 2.
+    expect(a?.shares[0]).toBeCloseTo(0.15, 10)
+    expect(a?.shares[1]).toBeCloseTo(0.7, 10)
+    const b = trend.series.find(s => s.moduleName === 'b')
+    // b is absent from bucket 0's second window and all of bucket 1: zeros count.
+    expect(b?.shares[0]).toBeCloseTo(0.15, 10)
+    expect(b?.shares[1]).toBe(0)
+  })
+
+  test('downsamples to at most maxPoints and sorts by peak', () => {
+    const snapshots = Array.from({ length: 300 }, (_, index) =>
+      snapshot(index * 1000, 5000, [row('low', 0.01, 1), row('high', 0.5, 5)]))
+    const trend = aggregateTrend(snapshots, '24h', 0, 120)
+    expect(trend.times).toHaveLength(120)
+    expect(trend.series[0]?.moduleName).toBe('high')
+    expect(trend.series[0]?.shares).toHaveLength(120)
+  })
+
+  test('drops windows before since and handles an empty range', () => {
+    const trend = aggregateTrend([snapshot(1, 5000, [row('a', 0.5, 1)])], '24h', 5000, 120)
+    expect(trend).toMatchObject({ windowCount: 0, times: [], series: [] })
+  })
+})
+

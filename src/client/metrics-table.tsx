@@ -45,7 +45,10 @@ export function MetricsTable({ rows, series, coverageThreshold, expanded, hotspo
   const head: React.CSSProperties = { ...cell, opacity: 0.7, cursor: 'pointer', userSelect: 'none' }
   const clickable = onToggle !== undefined
   const nameCell: React.CSSProperties = { ...cell, textAlign: 'left', cursor: clickable ? 'pointer' : 'default' }
+  // A real host has 200+ plugins. Without a cap the table is thousands of
+  // pixels tall and pushes everything below it out of view.
   return (
+    <div style={{ maxHeight: '48vh', overflow: 'auto' }}>
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
       <thead>
         <tr>
@@ -101,5 +104,6 @@ export function MetricsTable({ rows, series, coverageThreshold, expanded, hotspo
         })}
       </tbody>
     </table>
+    </div>
   )
 }

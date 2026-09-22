@@ -5,7 +5,7 @@
 // caller ties route lifetime to the plugin via a cordis effect.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { ClientVitals, PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot, PerfStats, VitalsView } from '../shared/contract'
+import type { ClientVitals, PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot, PerfStats, PerfTrend, VitalsView } from '../shared/contract'
 import type { Hotspot } from '../shared/contract'
 import { parseVitals } from './vitals'
 
@@ -25,6 +25,8 @@ export interface PerfService {
   history(query: PerfHistoryQuery): readonly PerfSnapshot[]
   /** Range aggregation over recorded windows; range is 1h | 24h | 7d. */
   stats(range: string): PerfStats
+  /** Compact downsampled series for the trend chart; range is 1h | 24h | 7d. */
+  trend(range: string): PerfTrend
   /**
    * Hot functions for one plugin. In-memory only and available only after a
    * deep-mode window; null when nothing was collected.
@@ -126,6 +128,17 @@ export function registerPerfRoutes(ws: RouteRegistrar, service: PerfService): ()
       handler: (req, res) => {
         try {
           respond(res, 200, service.stats(statsRangeOf(req)))
+        } catch (error) {
+          respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }),
+    ws.register({
+      kind: 'exact',
+      path: '/api-perf/trend',
+      handler: (req, res) => {
+        try {
+          respond(res, 200, service.trend(statsRangeOf(req)))
         } catch (error) {
           respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }
