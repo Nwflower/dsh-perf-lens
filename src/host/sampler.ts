@@ -90,12 +90,18 @@ export class Sampler {
   get heapActive(): boolean { return this.#heapActive }
   get disposed(): boolean { return this.#disposed }
 
-  /** Begin a CPU window. Idempotent while already recording. */
-  async startCpu(): Promise<void> {
+  /**
+   * Begin a CPU window. Idempotent while already recording.
+   *
+   * `intervalUs` overrides the configured interval for this window, which is
+   * how the background profile samples more coarsely without rebuilding the
+   * sampler.
+   */
+  async startCpu(intervalUs: number = this.options.cpuIntervalUs): Promise<void> {
     this.#assertLive()
     if (this.#cpuActive) return
     await post(this.session, 'Profiler.enable')
-    await post(this.session, 'Profiler.setSamplingInterval', { interval: this.options.cpuIntervalUs })
+    await post(this.session, 'Profiler.setSamplingInterval', { interval: intervalUs })
     await post(this.session, 'Profiler.start')
     this.#cpuActive = true
   }

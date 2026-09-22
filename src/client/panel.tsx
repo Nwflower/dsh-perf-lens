@@ -18,6 +18,7 @@ import { ControlBar } from './control-bar'
 import { GlobalBar } from './global-bar'
 import { t } from './i18n'
 import { MetricsTable } from './metrics-table'
+import { PluginCards } from './plugin-cards'
 import { Scoreboard } from './scoreboard'
 import { TrendChart } from './trend-chart'
 import { startVitalsReporter } from './vitals'
@@ -49,8 +50,13 @@ export function PerfPanel({ api }: PerfPanelProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [hotspots, setHotspots] = useState<Readonly<Record<string, readonly Hotspot[]>>>({})
   const [vitals, setVitals] = useState<VitalsView | null>(null)
+  // The sparkline series used to live only in this component's state, so every
+  // reload started blank. One seed from the host trend restores the recent past.
+  const seeded = useRef(false)
 
-  const pollMs = snapshot?.mode === 'continuous' ? DEFAULTS.continuousWindowMs : DEFAULTS.windowMs
+  const pollMs = snapshot?.mode === 'continuous'
+    ? DEFAULTS.continuousWindowMs
+    : snapshot?.mode === 'background' ? DEFAULTS.backgroundIdleMs : DEFAULTS.windowMs
 
   useEffect(() => {
     let cancelled = false
@@ -90,6 +96,18 @@ export function PerfPanel({ api }: PerfPanelProps) {
         if (cancelled) return
         setStats(nextStats)
         setTrend(nextTrend)
+        if (!seeded.current && nextTrend.times.length > 0) {
+          seeded.current = true
+          setSeries(previous => {
+            const updated: Record<string, number[]> = { ...previous }
+            for (const item of nextTrend.series) {
+              if ((updated[item.moduleName] ?? []).length === 0) {
+                updated[item.moduleName] = item.shares.slice(-SERIES_LENGTH)
+              }
+            }
+            return updated
+          })
+        }
       } catch {
         // The trend is an enhancement; a failed read must not blank the live board.
       }
@@ -171,6 +189,7 @@ export function PerfPanel({ api }: PerfPanelProps) {
         onPause={() => { void send({ action: 'pause' }) }}
         onResume={() => { void send({ action: 'resume' }) }}
         onToggleContinuous={() => { void send({ mode: snapshot.mode === 'continuous' ? 'duty' : 'continuous' }) }}
+        onToggleBackground={() => { void send({ mode: snapshot.mode === 'background' ? 'duty' : 'background' }) }}
         onToggleDeep={() => {
           const next = !deep
           setDeep(next)
@@ -208,6 +227,10 @@ export function PerfPanel({ api }: PerfPanelProps) {
         ) : null}
       </div>
       <div style={section}>
+        <div style={sectionHead}><strong>{t('topConsumers')}</strong></div>
+        <PluginCards rows={snapshot.plugins} series={series} stats={stats} />
+      </div>
+      <div style={section}>
         <div style={sectionHead}>
           <strong>{t('trend')}</strong>
           <span style={{ opacity: 0.6 }}>{t('range')}</span>
@@ -240,6 +263,7 @@ export function PerfPanel({ api }: PerfPanelProps) {
           expanded={expanded}
           hotspots={hotspots}
           onToggle={toggleHotspots}
+          stats={stats}
         />
       </div>
       {error !== null ? <div style={{ opacity: 0.7 }}>{error}</div> : null}

@@ -81,6 +81,8 @@ src/
     trend-chart.tsx      // [done] multi-plugin CPU trend, hides sub-threshold plugins
     scoreboard.tsx       // [done] cumulative-cost ranking (avg / p95 / peak / estimate)
     vitals.ts            // [done] long-task + rAF foreground reporter
+    plugin-cards.tsx     // [done] top-consumer cards (current / avg / peak)
+    metrics-table.tsx    // [done] grouped rows + static fold + avg/peak columns
     i18n.ts              // [done] zh dictionary
     plugin-detail.tsx    // [todo] per-plugin detail (Phase 2 body)
   shared/
@@ -454,4 +456,8 @@ node:fs 加载钩子字节级磁盘 I/O + 子进程采样（dsh-subprocess-local
 | 11 | 热点函数 sourcemap | 不做；实测 host 侧第三方包基本无 map，原始 functionName + file:line 已可用 |
 | 12 | 趋势图数据源 | **专用 /api-perf/trend 紧凑序列**，不复用 /api-perf/history：实测 24h 全量快照 31.5MB/次轮询，紧凑序列 119KB（259×），且按桶平均降采样保峰值 |
 | 13 | 面板布局 | 趋势图与积分榜置于插件表**上方**，插件表限高 48vh 滚动：真实宿主 200+ 插件，表格会把趋势顶到数千像素之下 |
+| 14 | 归并与分组 | host 把所有 `harness:*` owner **归并成单行 `harness`**（诊断 ownerKeys 仍留原始键）；面板分 `external / harness / runtime / self / other` 五组 |
+| 15 | 静态折叠 | 本窗口 cpu/heap/fs/alloc 全为 0 的行折叠为「静态 N 个」，按组可展开；这是**逐窗口判定**，不是永久标签 |
+| 16 | 后台采样档 | 新增 `SampleMode='background'`：1000µs 间隔 / 2s 窗口 / 120s 睡眠，低采样率常驻，面板关闭也在采集并落 JSONL |
+| 17 | sparkline 回填 | 面板挂载时用 `/api-perf/trend` 的最近 30 点回填序列；此前序列只活在组件 state 里，刷新即空 |
 

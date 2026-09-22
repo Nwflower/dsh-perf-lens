@@ -12,10 +12,11 @@ export interface ControlBarProps {
   readonly onPause: () => void
   readonly onResume: () => void
   readonly onToggleContinuous: () => void
+  readonly onToggleBackground: () => void
   readonly onToggleDeep: () => void
 }
 
-export function ControlBar({ mode, deep, busy, onPause, onResume, onToggleContinuous, onToggleDeep }: ControlBarProps) {
+export function ControlBar({ mode, deep, busy, onPause, onResume, onToggleContinuous, onToggleBackground, onToggleDeep }: ControlBarProps) {
   const button: React.CSSProperties = {
     padding: '3px 10px',
     fontSize: '12px',
@@ -43,6 +44,15 @@ export function ControlBar({ mode, deep, busy, onPause, onResume, onToggleContin
         onClick={onToggleContinuous}
       >
         {t('continuous')}
+      </button>
+      <button
+        type="button"
+        style={mode === 'background' ? active : button}
+        disabled={busy}
+        onClick={onToggleBackground}
+        title={t('backgroundHint')}
+      >
+        {t('background')}
       </button>
       <button type="button" style={deep ? active : button} disabled={busy} onClick={onToggleDeep}>
         {t('deep')}

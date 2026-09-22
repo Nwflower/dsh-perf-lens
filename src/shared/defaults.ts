@@ -12,6 +12,14 @@ export const DEFAULTS = {
   idleMs: 30_000,
   continuousWindowMs: 2000,
   continuousMaxMs: 600_000,
+  /**
+   * Background profile: coarser interval, short window, long sleep. The point
+   * is a cheap always-on record of "which plugin has been costing", not
+   * per-frame resolution.
+   */
+  backgroundCpuIntervalUs: 1000,
+  backgroundWindowMs: 2000,
+  backgroundIdleMs: 120_000,
   coverageWarnThreshold: 0.6,
   unattributedWarnThreshold: 0.15,
   /**

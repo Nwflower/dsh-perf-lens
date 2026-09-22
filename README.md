@@ -110,4 +110,11 @@ loader 的 `ctx.baseUrl` 是**目录 file URL**（不是插件路径）；连续
 - [x] 前台卡顿桥接（/api-perf/vitals）
   - [x] client 测 Long Tasks + rAF 帧间隔，POST 聚合回 host；host 内存环状缓冲
   - [x] 面板并列展示卡顿指标与 host CPU Top-3 插件，标注「相关性≠因果」
+- [x] Phase 2 产品化（见 [docs/plan-phase2.md](docs/plan-phase2.md)）
+  - [x] harness owner 归并为单行 + 五组分组（shared/grouping.ts）+ 静态行折叠
+  - [x] 卡片式看板：Top-N 消耗卡片（当前 / 平均 / 峰值 + sparkline）
+  - [x] 明细表分组渲染 + 平均/峰值列
+  - [x] 后台采样档 SampleMode='background'（1000µs / 2s / 120s）
+  - [x] sparkline 序列用 /api-perf/trend 回填，刷新不再清零
+  - [x] 127 项单测 + 四门禁全绿
 - [ ] Phase 1 收尾：目录字节扫描 / 自身开销自测量 / 定时器与句柄计数 / ctx.fs 字节包装

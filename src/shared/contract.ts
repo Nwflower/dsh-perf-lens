@@ -17,6 +17,11 @@ export type SampleMode =
   | 'duty'
   /** Back-to-back windows while the panel is open; bounded by continuousMaxMs. */
   | 'continuous'
+  /**
+   * Low-rate always-on capture: a coarser sampling interval and a long sleep,
+   * so the host keeps a history even while nobody is looking at the board.
+   */
+  | 'background'
   /** Explicitly paused by the user. */
   | 'paused'
 

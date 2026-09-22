@@ -4,7 +4,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { createOwnerIndex, type ProfileNode } from '../src/host/attribute'
 import { HotspotStore } from '../src/host/hotspots'
-import { continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, type LensDeps } from '../src/host/lens'
+import { collapseIoCounts, collapseOwnerCounts, continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, type LensDeps } from '../src/host/lens'
 import type { Sampler } from '../src/host/sampler'
 import type { PerfSnapshot } from '../src/shared/contract'
 
@@ -286,3 +286,68 @@ describe('Lens lifecycle', () => {
     expect(lens.running).toBe(false)
   })
 })
+
+describe('background profile', () => {
+  test('uses the coarse interval and the short window', async () => {
+    const h = makeHarness()
+    const lens = new Lens(h.deps)
+    lens.setMode('background')
+    await lens.runWindow()
+    expect(h.sleeps).toContain(DEFAULT_LENS_OPTIONS.backgroundWindowMs)
+    expect(h.sampler.startCpu).toHaveBeenCalledWith(DEFAULT_LENS_OPTIONS.backgroundCpuIntervalUs)
+    expect(lens.snapshot().mode).toBe('background')
+  })
+
+  test('sleeps the background interval regardless of how idle the window was', () => {
+    expect(nextIdleWait('background', 30_000, 0, 120_000)).toBe(120_000)
+    expect(nextIdleWait('background', 30_000, 0.99, 120_000)).toBe(120_000)
+    expect(nextIdleWait('duty', 30_000, 0.99)).toBe(120_000)
+    expect(nextIdleWait('duty', 30_000, 0.1)).toBe(30_000)
+  })
+})
+
+describe('harness folding', () => {
+  test('collapseOwnerCounts sums every harness subpackage into one owner', () => {
+    const folded = collapseOwnerCounts(new Map([
+      ['harness:@deepseek-ai/dsh-a', 3],
+      ['harness:@deepseek-ai/dsh-b', 4],
+      ['plugin:x', 5],
+      ['runtime', 1],
+    ]))
+    expect(folded.get('harness')).toBe(7)
+    expect(folded.get('plugin:x')).toBe(5)
+    expect(folded.get('runtime')).toBe(1)
+  })
+
+  test('collapseIoCounts folds read and write counts additively', () => {
+    const folded = collapseIoCounts(new Map([
+      ['harness:a', { read: 1, write: 2 }],
+      ['harness:b', { read: 3, write: 4 }],
+    ]))
+    expect(folded.get('harness')).toEqual({ read: 4, write: 6 })
+  })
+
+  test('a window with two harness owners yields one harness row', async () => {
+    const h = makeHarness()
+    h.sampler.stopCpu.mockResolvedValue({
+      nodes: [
+        { id: 1, callFrame: { url: '/dsh/a/x.js' }, children: [] },
+        { id: 2, callFrame: { url: '/dsh/b/y.js' }, children: [] },
+      ],
+      samples: [1, 2, 2],
+    })
+    const lens = new Lens({
+      ...h.deps,
+      ownerIndex: () => createOwnerIndex([
+        { kind: 'harness', name: 'dsh-a', prefix: '/dsh/a/' },
+        { kind: 'harness', name: 'dsh-b', prefix: '/dsh/b/' },
+      ]),
+    })
+    const snapshot = await lens.runWindow()
+    const harnessRows = snapshot.plugins.filter(row => row.moduleName.startsWith('harness'))
+    expect(harnessRows).toHaveLength(1)
+    expect(harnessRows[0]?.moduleName).toBe('harness')
+    expect(harnessRows[0]?.cpuShare).toBe(1)
+  })
+})
+

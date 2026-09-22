@@ -28,6 +28,10 @@ export interface LensOptions {
   readonly idleMs: number
   readonly continuousWindowMs: number
   readonly continuousMaxMs: number
+  /** Background profile: coarser interval, short window, long sleep. */
+  readonly backgroundCpuIntervalUs: number
+  readonly backgroundWindowMs: number
+  readonly backgroundIdleMs: number
   /** Deep mode enables heap sampling on top of CPU sampling. */
   readonly deep: boolean
   readonly heapIntervalBytes: number
@@ -68,6 +72,9 @@ export const DEFAULT_LENS_OPTIONS: LensOptions = {
   idleMs: DEFAULTS.idleMs,
   continuousWindowMs: DEFAULTS.continuousWindowMs,
   continuousMaxMs: DEFAULTS.continuousMaxMs,
+  backgroundCpuIntervalUs: DEFAULTS.backgroundCpuIntervalUs,
+  backgroundWindowMs: DEFAULTS.backgroundWindowMs,
+  backgroundIdleMs: DEFAULTS.backgroundIdleMs,
   deep: false,
   heapIntervalBytes: 32 * 1024,
   persistHistory: true,
@@ -95,6 +102,35 @@ export function tallyHeap(root: HeapNode, index: OwnerIndex): Map<string, number
   walk(root, [])
   return counts
 }
+/**
+ * Fold every `harness:<subpackage>` owner into one `harness` row.
+ *
+ * The design always said harness folds to a single line; without this the
+ * board listed each internal dsh-* package separately and a 200-plugin host
+ * buried the actual consumers in harness internals.
+ */
+export function collapseOwnerCounts(counts: ReadonlyMap<string, number>): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const [key, value] of counts) {
+    const target = key.startsWith('harness:') ? 'harness' : key
+    out.set(target, (out.get(target) ?? 0) + value)
+  }
+  return out
+}
+
+/** Same fold for the async_hooks file-operation counts. */
+export function collapseIoCounts(
+  counts: ReadonlyMap<string, { readonly read: number; readonly write: number }>,
+): Map<string, { read: number; write: number }> {
+  const out = new Map<string, { read: number; write: number }>()
+  for (const [key, value] of counts) {
+    const target = key.startsWith('harness:') ? 'harness' : key
+    const existing = out.get(target) ?? { read: 0, write: 0 }
+    out.set(target, { read: existing.read + value.read, write: existing.write + value.write })
+  }
+  return out
+}
+
 
 /**
  * Whether a continuous-mode budget has run out. Continuous mode must never be
@@ -111,8 +147,9 @@ export function continuousExpired(mode: SampleMode, now: number, continuousSince
  * attribution, so back off geometrically up to a cap. Continuous mode is never
  * backed off: the user is watching.
  */
-export function nextIdleWait(mode: SampleMode, idleMs: number, idleShare: number): number {
+export function nextIdleWait(mode: SampleMode, idleMs: number, idleShare: number, backgroundIdleMs = idleMs): number {
   if (mode === 'continuous') return 0
+  if (mode === 'background') return backgroundIdleMs
   if (idleShare < DEFAULTS.idleBackoffThreshold) return idleMs
   return Math.min(idleMs * DEFAULTS.idleBackoffFactor, DEFAULTS.idleBackoffMaxMs)
 }
@@ -204,7 +241,7 @@ export class Lens {
   async runWindow(): Promise<PerfSnapshot> {
     const clock = this.#clock()
     const deep = this.#deep
-    const windowMs = this.#mode === 'continuous' ? this.#options.continuousWindowMs : this.#options.windowMs
+    const windowMs = this.#windowMs()
     const startedAt = clock.now()
     try {
       // Inside the try: a throw while resolving the owner index must still run
@@ -212,7 +249,7 @@ export class Lens {
       this.#deps.metrics.start()
       this.#deps.io.setOwnerIndex(this.#deps.ownerIndex())
       this.#deps.io.enable()
-      await this.#deps.sampler.startCpu()
+      await this.#deps.sampler.startCpu(this.#cpuIntervalUs())
       if (deep) await this.#deps.sampler.startHeap()
       await clock.sleep(windowMs)
       const cpu = await this.#deps.sampler.stopCpu()
@@ -235,6 +272,18 @@ export class Lens {
   }
 
   #clock(): LensClock { return this.#deps.clock ?? SYSTEM_CLOCK }
+
+  /** Window length for the active profile. */
+  #windowMs(): number {
+    if (this.#mode === 'continuous') return this.#options.continuousWindowMs
+    if (this.#mode === 'background') return this.#options.backgroundWindowMs
+    return this.#options.windowMs
+  }
+
+  /** CPU sampling interval for the active profile. */
+  #cpuIntervalUs(): number {
+    return this.#mode === 'background' ? this.#options.backgroundCpuIntervalUs : this.#options.cpuIntervalUs
+  }
 
   /**
    * Sleep that a control change can cut short. `wait <= 0` still goes through the
@@ -264,9 +313,14 @@ export class Lens {
   ): PerfSnapshot {
     const index = this.#deps.ownerIndex()
     const samples = cpu?.samples ?? []
-    const cpuCounts = cpu === null ? new Map<string, number>() : tallySamples(samples, cpu.nodes, index)
-    const heapCounts = heap === null ? new Map<string, number>() : tallyHeap(heap.head, index)
+    const rawCpuCounts = cpu === null ? new Map<string, number>() : tallySamples(samples, cpu.nodes, index)
+    const rawHeapCounts = heap === null ? new Map<string, number>() : tallyHeap(heap.head, index)
+    // Rows use the folded view; diagnostics keep the raw keys so a specific
+    // harness subpackage can still be found when attribution looks wrong.
+    const cpuCounts = collapseOwnerCounts(rawCpuCounts)
+    const heapCounts = collapseOwnerCounts(rawHeapCounts)
     const io = this.#deps.io.take()
+    const ioPerOwner = collapseIoCounts(io.perOwner)
     const sampleCount = samples.length
     const idleSamples = cpuCounts.get('idle') ?? 0
     // Shares are over active samples: idle wall time is not cost, and including
@@ -279,20 +333,20 @@ export class Lens {
     for (const fact of this.#deps.plugins()) {
       const key = `plugin:${fact.moduleName}`
       seen.add(key)
-      rows.push(this.#row(key, fact.moduleName, fact.entryId, fact.fiberPhase, cpuCounts, heapCounts, io, activeSamples))
+      rows.push(this.#row(key, fact.moduleName, fact.entryId, fact.fiberPhase, cpuCounts, heapCounts, ioPerOwner, activeSamples))
     }
     for (const key of cpuCounts.keys()) {
       if (key === 'idle' || key.startsWith('plugin:') || seen.has(key)) continue
       seen.add(key)
-      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, io, activeSamples))
+      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples))
     }
     // Owners with file activity but no CPU samples still deserve a row.
-    for (const key of io.perOwner.keys()) {
+    for (const key of ioPerOwner.keys()) {
       if (key.startsWith('plugin:') || seen.has(key)) continue
       seen.add(key)
-      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, io, activeSamples))
+      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples))
     }
-    this.#lastOwnerKeys = [...cpuCounts.keys()]
+    this.#lastOwnerKeys = [...rawCpuCounts.keys()]
     // Hot functions are a deep-mode extra and frame-level data: they go to the
     // in-memory store only, never into the snapshot that history persists.
     if (this.#deep && cpu !== null) {
@@ -320,11 +374,11 @@ export class Lens {
     fiberPhase: string,
     cpuCounts: ReadonlyMap<string, number>,
     heapCounts: ReadonlyMap<string, number>,
-    io: { perOwner: ReadonlyMap<string, { read: number; write: number }> },
+    ioPerOwner: ReadonlyMap<string, { readonly read: number; readonly write: number }>,
     activeSamples: number,
   ): PluginMetricRow {
     const cpuSamples = cpuCounts.get(key) ?? 0
-    const ioCounts = io.perOwner.get(key)
+    const ioCounts = ioPerOwner.get(key)
     const sampleCount = activeSamples
     return {
       moduleName,
@@ -368,7 +422,7 @@ export class Lens {
       // synchronously would otherwise loop entirely on microtasks and starve
       // the host event loop (observed as dsh hanging). A macrotask yield per
       // iteration is the safety valve.
-      const nominal = nextIdleWait(this.#mode, this.#options.idleMs, this.#lastIdleShare)
+      const nominal = nextIdleWait(this.#mode, this.#options.idleMs, this.#lastIdleShare, this.#options.backgroundIdleMs)
       // After a failed window, never retry faster than 30s: a broken profiler or
       // owner index must not turn continuous mode into a hammering loop.
       const wait = this.#lastError === null ? nominal : Math.max(nominal, 30_000)
