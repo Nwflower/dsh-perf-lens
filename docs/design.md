@@ -61,6 +61,9 @@ src/
     history.ts           // [done] ring buffer + JSONL persistence (rotation / retention)
     lens.ts              // [done] duty-cycle / continuous orchestration + snapshots
     routes.ts            // [done] /api-perf/* routes (webServer late injection)
+    stats.ts             // [done] range aggregation (avg / peak / p95 / cumulative)
+    hotspots.ts          // [done] hot-function Top-N (in-memory only, never persisted)
+    vitals.ts            // [done] browser foreground-vitals ring (in-memory only)
     footprint.ts         // [todo] directory byte scan (path -> owner)
     self-monitor.ts      // [todo] own-overhead self measurement and reporting
   client/                // browser side
@@ -75,17 +78,23 @@ src/
     control-bar.tsx      // [done] pause / continuous / deep controls
     coverage-badge.tsx   // [done] partial-metric marker
     sparkline.tsx        // [done] inline SVG sparkline (no chart lib)
+    trend-chart.tsx      // [done] multi-plugin CPU trend, hides sub-threshold plugins
+    scoreboard.tsx       // [done] cumulative-cost ranking (avg / p95 / peak / estimate)
+    vitals.ts            // [done] long-task + rAF foreground reporter
     i18n.ts              // [done] zh dictionary
     plugin-detail.tsx    // [todo] per-plugin detail (Phase 2 body)
   shared/
     contract.ts          // metric contract types (single source of truth)
     defaults.ts          // window lengths / duty cycle / thresholds
+    math.ts              // shared percentile helper
 test/
   attribute.test.ts      // locks the 3.33 ratio fixture + synthetic tree walk
   sampler.test.ts        // start/stop pairing / unload stop / continuous toggle
   io-tracker.test.ts     // async counts per owner / sync exclusion / calibration
   history.test.ts        // ring semantics / JSONL rotation / retention sweep
-  coverage.test.ts       // low coverage renders ">= N"
+  stats.test.ts          // range aggregation arithmetic
+  hotspots.test.ts       // hot-function grouping + never-persisted assertion
+  vitals.test.ts         // vitals ring + untrusted body parsing
 scripts/                 // build & local wiring (register / web smoke)
 ```
 
@@ -323,6 +332,9 @@ functionName 为 `(idle)`（实测：空闲 3s 的 1716 个样本里 1715 个如
 | /api-perf/snapshot | GET | 当前窗口快照（global + plugins + unattributed 占比） | v1 |
 | /api-perf/control | POST | pause / resume / mode: continuous \| duty / deep / shallow，立即生效 | v1 |
 | /api-perf/history?plugin=&since= | GET | 时序查询（环状缓冲 + JSONL） | v1 |
+| /api-perf/stats?range=1h\|24h\|7d | GET | 范围聚合：每插件 avg/peak/p95/累计核时/覆盖率 | v1 |
+| /api-perf/hotspots?plugin= | GET | 每插件热点函数 Top-N；仅深度模式、内存驻留 | v1 |
+| /api-perf/vitals | GET/POST | 前台卡顿上报与读取；POST body 校验后入内存环 | v1 |
 | /api-perf/export | GET | 报告导出（JSON / Markdown） | Phase 2 |
 | /api-perf/heap-snapshot | POST | 抓堆快照落盘，返回文件地址 | Phase 2 |
 
@@ -435,4 +447,8 @@ node:fs 加载钩子字节级磁盘 I/O + 子进程采样（dsh-subprocess-local
 | 5 | 基线对比 | Phase 2 |
 | 6 | 实时看板形态 | **v1**：sidebar.panellist 条目 + main 主区看板 + 连续采样模式（见 §3） |
 | 7 | 面板注入位置 | **dsh 0.1.7 插件面板同构**：sidebar.panellist + main + ctx.layout.selectPanel（需 dsh ≥ 0.1.7-alpha.1） |
+| 8 | 积分口径 | 累计**采样窗口内**核时（cpuSelfMs 求和），并同时给出采样覆盖率；外推值必须标「估算」，不做无声外推 |
+| 9 | 前台卡顿归因 | 浏览器无法把 longtask 归因到插件 bundle，只呈现与 host CPU 的**时间相关性**，UI 常驻「相关性≠因果」 |
+| 10 | 热点函数持久化 | **永不落盘**（帧级数据，§7 红线）；仅内存驻留、仅深度模式、关闭即清空 |
+| 11 | 热点函数 sourcemap | 不做；实测 host 侧第三方包基本无 map，原始 functionName + file:line 已可用 |
 

@@ -99,6 +99,15 @@ loader 的 `ctx.baseUrl` 是**目录 file URL**（不是插件路径）；连续
   - [x] JSONL 历史落盘（按天轮转 + 保留期 + 总量上限 + 隐私默认只落计数）
   - [x] /api-perf/snapshot | control | history 路由（webServer 延迟注入）
   - [x] 任务管理器面板：sidebar.panellist 条目 + main 看板（表格 / sparkline / 全局条 / 控制区）
-  - [x] 82 项单测（host 80 + client 2）+ 类型检查 + 构建 + lint 全绿
+  - [x] 107 项单测（host 100 + client 7）+ 类型检查 + 构建 + lint 全绿
   - [x] CPU 采样间隔默认 250µs（实测与 1000µs 同价、4 倍分辨率）+ 空闲退避 + per-node 归因记忆化
+- [x] 趋势与积分（/api-perf/stats?range=1h|24h|7d）
+  - [x] 范围聚合纯函数：avg / peak / p95 / 累计核时 / 采样覆盖率（估算值带标注）
+  - [x] SVG 百分比趋势图，隐藏峰值 < 0.5% 的插件；积分榜按累计核时排序
+- [x] 热点函数 Top-N（/api-perf/hotspots?plugin=）
+  - [x] 仅深度模式采集；**只驻留内存、永不落盘**（design.md §7 隐私红线）
+  - [x] 面板按插件行展开；sourcemap 未做（host 侧实测基本无 map，见评审结论）
+- [x] 前台卡顿桥接（/api-perf/vitals）
+  - [x] client 测 Long Tasks + rAF 帧间隔，POST 聚合回 host；host 内存环状缓冲
+  - [x] 面板并列展示卡顿指标与 host CPU Top-3 插件，标注「相关性≠因果」
 - [ ] Phase 1 收尾：目录字节扫描 / 自身开销自测量 / 定时器与句柄计数 / ctx.fs 字节包装
