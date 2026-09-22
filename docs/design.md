@@ -64,18 +64,11 @@ src/
     footprint.ts         // [todo] directory byte scan (path -> owner)
     self-monitor.ts      // [todo] own-overhead self measurement and reporting
   client/                // browser side
-    index.tsx            // entry: sidebar.panellist + main registration
-    ctx.ts               // structural ClientCtx faces (slots / locale / layout)
-    sidebar-entry.tsx    // sidebar.panellist icon row (dsh >= 0.1.7 panel pattern)
-    panel.tsx            // main-panel task-manager board
-    api.ts               // /api-perf/* polling (interval follows sample window)
-    global-bar.tsx       // global strip (RSS / heap / lag / window info)
-    control-bar.tsx      // sampling controls / deep mode / export
-    metrics-table.tsx    // sortable per-plugin table
-    sparkline.tsx        // inline SVG sparkline (no chart lib)
-    coverage-badge.tsx   // coverage badges and warnings
-    plugin-detail.tsx    // per-plugin detail (Phase 2 body)
-    api.ts               // [done] /api-perf client
+    index.tsx            // [done] entry: sidebar.panellist + main registration
+    ctx.ts               // [done] structural ClientCtx faces (slots / locale / layout)
+    sidebar-entry.tsx    // [done] sidebar.panellist icon row (dsh >= 0.1.7 panel pattern)
+    panel.tsx            // [done] main-panel task-manager board
+    api.ts               // [done] /api-perf/* polling (interval follows sample window)
     format.ts            // [done] byte / percent / duration formatting
     metrics-table.tsx    // [done] sortable per-plugin table
     global-bar.tsx       // [done] global strip + coverage warnings
@@ -83,6 +76,7 @@ src/
     coverage-badge.tsx   // [done] partial-metric marker
     sparkline.tsx        // [done] inline SVG sparkline (no chart lib)
     i18n.ts              // [done] zh dictionary
+    plugin-detail.tsx    // [todo] per-plugin detail (Phase 2 body)
   shared/
     contract.ts          // metric contract types (single source of truth)
     defaults.ts          // window lengths / duty cycle / thresholds

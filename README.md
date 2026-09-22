@@ -1,11 +1,12 @@
 # dsh-perf-lens
 
-DeepSeek Harness 插件资源开销分析面板（**调研阶段，尚未实现**）。
+DeepSeek Harness 插件资源开销分析面板（**Phase 1 MVP 已实现**）。
 
 目的是把「排查性能问题时每次临时写脚本」变成常驻能力：回答**哪个插件在吃 CPU、吃内存、读写磁盘**，
 并把结论展示在 Web GUI 面板上。
 
-本仓库当前只包含**可行性调研结论 + 可复现的实测证据 + 探针脚本**，代码尚未开始。
+host 采样链路（归因 / 采样器 / IoTracker / 全局指标 / JSONL / 路由）与 client 看板均已落地，
+文档与探针保留在 `docs/` 与 `probes/`。
 
 ## 结论摘要
 
@@ -98,5 +99,6 @@ loader 的 `ctx.baseUrl` 是**目录 file URL**（不是插件路径）；连续
   - [x] JSONL 历史落盘（按天轮转 + 保留期 + 总量上限 + 隐私默认只落计数）
   - [x] /api-perf/snapshot | control | history 路由（webServer 延迟注入）
   - [x] 任务管理器面板：sidebar.panellist 条目 + main 看板（表格 / sparkline / 全局条 / 控制区）
-  - [x] 57 项单测（host 55 + client 2）+ 类型检查 + 构建 + lint 全绿
+  - [x] 82 项单测（host 80 + client 2）+ 类型检查 + 构建 + lint 全绿
+  - [x] CPU 采样间隔默认 250µs（实测与 1000µs 同价、4 倍分辨率）+ 空闲退避 + per-node 归因记忆化
 - [ ] Phase 1 收尾：目录字节扫描 / 自身开销自测量 / 定时器与句柄计数 / ctx.fs 字节包装
