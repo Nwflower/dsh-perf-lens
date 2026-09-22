@@ -39,6 +39,14 @@ describe('createPerfApi', () => {
     expect(fetchImpl).toHaveBeenCalledWith('/api-perf/history?plugin=dsh-context&since=100')
   })
 
+  test('reads the stats endpoint with the range', async () => {
+    const stats = { range: '7d', since: 0, windowCount: 0, sampledWindowMs: 0, coverage: 0, plugins: [] }
+    const fetchImpl = vi.fn(async () => jsonResponse(stats))
+    const api = createPerfApi(fetchImpl as unknown as typeof fetch)
+    expect(await api.stats('7d')).toEqual(stats)
+    expect(fetchImpl).toHaveBeenCalledWith('/api-perf/stats?range=7d')
+  })
+
   test('throws on a failed response', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 500, statusText: 'Internal Server Error' }) as Response)
     const api = createPerfApi(fetchImpl as unknown as typeof fetch)

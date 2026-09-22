@@ -23,7 +23,20 @@ export const DEFAULTS = {
   idleBackoffMaxMs: 120_000,
   /** A window at or above this idle share counts as idle for the backoff. */
   idleBackoffThreshold: 0.8,
+  /**
+   * A plugin whose peak cpuShare over a trend range is below this never enters
+   * the trend chart. It is the "hide 0% plugins" rule, kept just above zero so
+   * a plugin that merely idled is not drawn as a flat line.
+   */
+  trendHideThreshold: 0.005,
 } as const
 
 /** Sidebar entry id and the matching main-panel key (dsh 0.1.7 plugin-panel pattern). */
 export const PANEL_ID = 'perf-lens'
+
+/** Range key to milliseconds; the client uses it to bound its history query. */
+export const RANGE_MS = {
+  '1h': 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+} as const

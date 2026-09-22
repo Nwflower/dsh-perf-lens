@@ -1,12 +1,13 @@
 // Browser side of the /api-perf contract. All response types come from
 // src/shared/contract.ts, the same module the host collector writes.
 
-import type { PerfControlRequest, PerfHistoryQuery, PerfSnapshot } from '../shared/contract'
+import type { PerfControlRequest, PerfHistoryQuery, PerfRange, PerfSnapshot, PerfStats } from '../shared/contract'
 
 export interface PerfApi {
   snapshot(): Promise<PerfSnapshot>
   control(body: PerfControlRequest): Promise<PerfSnapshot>
   history(query?: PerfHistoryQuery): Promise<readonly PerfSnapshot[]>
+  stats(range: PerfRange): Promise<PerfStats>
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -34,6 +35,9 @@ export function createPerfApi(fetchImpl: typeof fetch = fetch): PerfApi {
       const suffix = params.size === 0 ? '' : `?${params.toString()}`
       const payload = await readJson<{ snapshots: PerfSnapshot[] }>(await fetchImpl(`/api-perf/history${suffix}`))
       return payload.snapshots
+    },
+    async stats(range) {
+      return await readJson<PerfStats>(await fetchImpl(`/api-perf/stats?range=${range}`))
     },
   }
 }

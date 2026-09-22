@@ -98,6 +98,46 @@ export interface PerfHistoryQuery {
   readonly since?: number
 }
 
+/** Aggregation window for /api-perf/stats. */
+export type PerfRange = '1h' | '24h' | '7d'
+
+/**
+ * Per-plugin aggregate over a time range. avg / peak / p95 use the same
+ * active-sample denominator as a single window's cpuShare, so a plugin's
+ * average is comparable to the number the table shows live.
+ */
+export interface PluginStatsRow {
+  readonly moduleName: string
+  readonly avgCpuShare: number
+  readonly peakCpuShare: number
+  readonly p95CpuShare: number
+  /** Sum of attributed CPU ms across sampled windows. Sampled, not wall time. */
+  readonly cumulativeCpuMs: number
+  /**
+   * cumulativeCpuMs scaled by sampling coverage: an estimate of the true cost
+   * had sampling been continuous. Always present it as an estimate.
+   */
+  readonly estimatedCpuMs: number
+  /** Sampled window time / range wall time, 0..1. */
+  readonly coverage: number
+  /** Windows in which this plugin had a row. */
+  readonly windows: number
+}
+
+/** Response of GET /api-perf/stats. */
+export interface PerfStats {
+  readonly range: PerfRange
+  /** Epoch milliseconds the range starts at. */
+  readonly since: number
+  readonly windowCount: number
+  /** Total sampled window time across the range. */
+  readonly sampledWindowMs: number
+  /** sampledWindowMs / range wall time, 0..1. */
+  readonly coverage: number
+  /** Sorted by cumulativeCpuMs descending. */
+  readonly plugins: readonly PluginStatsRow[]
+}
+
 /** One resolved owner rule, for troubleshooting attribution. */
 export interface OwnerRuleView {
   readonly kind: string

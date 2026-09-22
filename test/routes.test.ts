@@ -1,8 +1,8 @@
 // The /api-perf surface: JSON bodies, query parsing, and disposer semantics.
 
 import { describe, expect, test, vi } from 'vitest'
-import { historyQueryOf, readJsonBody, registerPerfRoutes, type RouteRegistrar } from '../src/host/routes'
-import type { PerfSnapshot } from '../src/shared/contract'
+import { historyQueryOf, readJsonBody, registerPerfRoutes, statsRangeOf, type RouteRegistrar } from '../src/host/routes'
+import type { PerfSnapshot, PerfStats } from '../src/shared/contract'
 
 const SNAPSHOT: PerfSnapshot = {
   windowStartedAt: 1, mode: 'duty',
@@ -42,6 +42,9 @@ function harness() {
     snapshot: vi.fn(() => SNAPSHOT),
     control: vi.fn(() => SNAPSHOT),
     history: vi.fn(() => [SNAPSHOT]),
+    stats: vi.fn((): PerfStats => ({
+      range: '24h', since: 0, windowCount: 0, sampledWindowMs: 0, coverage: 0, plugins: [],
+    })),
     diagnostics: vi.fn(() => ({
       lastError: null, windowStartedAt: 1, sampleCount: 9,
       ownerKeys: ['plugin:a'], ownerRules: [{ kind: 'plugin', name: 'a', prefix: '/a/' }],
@@ -52,13 +55,14 @@ function harness() {
 }
 
 describe('registerPerfRoutes', () => {
-  test('registers the three routes and unregisters on dispose', () => {
+  test('registers the routes and unregisters on dispose', () => {
     const h = harness()
     expect([...h.handlers.keys()].sort()).toEqual([
       '/api-perf/control',
       '/api-perf/diagnostics',
       '/api-perf/history',
       '/api-perf/snapshot',
+      '/api-perf/stats',
     ])
     h.dispose()
     expect(h.handlers.size).toBe(0)
@@ -100,6 +104,16 @@ describe('registerPerfRoutes', () => {
     h.handlers.get('/api-perf/history')?.(fakeReq('/api-perf/history?plugin=dsh-context&since=100'), res)
     expect(h.service.history).toHaveBeenCalledWith({ plugin: 'dsh-context', since: 100 })
   })
+
+  test('stats forwards the range query, defaulting to 24h', () => {
+    const h = harness()
+    const { res, captured } = fakeRes()
+    h.handlers.get('/api-perf/stats')?.(fakeReq('/api-perf/stats?range=7d'), res)
+    expect(h.service.stats).toHaveBeenCalledWith('7d')
+    expect(captured.status).toBe(200)
+    h.handlers.get('/api-perf/stats')?.(fakeReq('/api-perf/stats'), fakeRes().res)
+    expect(h.service.stats).toHaveBeenLastCalledWith('24h')
+  })
 })
 
 describe('request parsing helpers', () => {
@@ -109,5 +123,10 @@ describe('request parsing helpers', () => {
 
   test('a non-numeric since is ignored', () => {
     expect(historyQueryOf(fakeReq('/api-perf/history?since=abc') as never)).toEqual({})
+  })
+
+  test('stats range defaults to 24h', () => {
+    expect(statsRangeOf(fakeReq('/api-perf/stats') as never)).toBe('24h')
+    expect(statsRangeOf(fakeReq('/api-perf/stats?range=1h') as never)).toBe('1h')
   })
 })

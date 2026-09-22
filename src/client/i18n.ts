@@ -33,6 +33,17 @@ const DICT = {
   error: '采样面板不可用',
   lowCoverage: '覆盖不足',
   deepOn: '深度模式已开（双采样）',
+  trend: '趋势（CPU 占比）',
+  scoreboard: '积分榜（累计核时）',
+  range: '范围',
+  avg: '平均',
+  peak: '峰值',
+  p95: 'p95',
+  cumulative: '累计',
+  estimate: '估算',
+  refresh: '刷新',
+  noTrend: '趋势数据不足（至少两个窗口）',
+  hiddenZero: '已隐藏占用 < 阈值 的插件',
 } as const
 
 export type MessageKey = keyof typeof DICT

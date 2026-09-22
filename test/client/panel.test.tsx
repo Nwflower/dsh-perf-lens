@@ -5,7 +5,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { PerfApi } from '../../src/client/api'
 import { PerfPanel } from '../../src/client/panel'
-import type { PerfSnapshot } from '../../src/shared/contract'
+import type { PerfSnapshot, PerfStats } from '../../src/shared/contract'
 
 const SNAPSHOT: PerfSnapshot = {
   windowStartedAt: 1,
@@ -24,11 +24,20 @@ const SNAPSHOT: PerfSnapshot = {
   selfShare: 0,
 }
 
+const STATS: PerfStats = {
+  range: '24h', since: 0, windowCount: 1, sampledWindowMs: 5000, coverage: 0.1,
+  plugins: [{
+    moduleName: 'pluginA', avgCpuShare: 0.5, peakCpuShare: 0.5, p95CpuShare: 0.5,
+    cumulativeCpuMs: 10, estimatedCpuMs: 100, coverage: 0.1, windows: 1,
+  }],
+}
+
 function apiOf(snapshot: PerfSnapshot): PerfApi {
   return {
     snapshot: vi.fn(async () => snapshot),
     control: vi.fn(async () => snapshot),
     history: vi.fn(async () => [snapshot]),
+    stats: vi.fn(async () => STATS),
   }
 }
 
@@ -37,8 +46,9 @@ afterEach(cleanup)
 describe('PerfPanel', () => {
   test('renders the plugin row after the first poll', async () => {
     render(<PerfPanel api={apiOf(SNAPSHOT)} />)
-    await waitFor(() => { expect(screen.getByText('pluginA')).toBeTruthy() })
-    expect(screen.getByText('50.0%')).toBeTruthy()
+    // pluginA now appears in the live table, the trend legend and the scoreboard.
+    await waitFor(() => { expect(screen.getAllByText('pluginA').length).toBeGreaterThan(0) })
+    expect(screen.getAllByText('50.0%').length).toBeGreaterThan(0)
   })
 
   test('surfaces a failed poll', async () => {
@@ -46,6 +56,7 @@ describe('PerfPanel', () => {
       snapshot: vi.fn(async () => { throw new Error('boom') }),
       control: vi.fn(async () => SNAPSHOT),
       history: vi.fn(async () => []),
+      stats: vi.fn(async () => STATS),
     }
     render(<PerfPanel api={api} />)
     await waitFor(() => { expect(screen.getByText(/boom/)).toBeTruthy() })

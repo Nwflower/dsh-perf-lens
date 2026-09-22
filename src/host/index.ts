@@ -22,6 +22,7 @@ import { GlobalMetrics } from './metrics'
 import { buildOwnerIndex, harnessNodeModulesPrefix, type LoaderEntryFacts } from './plugin-index'
 import { registerPerfRoutes } from './routes'
 import { Sampler } from './sampler'
+import { aggregateStats, rangeToSince } from './stats'
 
 export const name = 'perf-lens'
 
@@ -162,6 +163,11 @@ export function apply(rawCtx: Context): void {
         return lens.snapshot()
       },
       history: (query) => history.read(query.since),
+      stats: (range) => {
+        const now = Date.now()
+        const resolved = rangeToSince(range, now)
+        return aggregateStats(history.read(resolved.since), resolved.range, resolved.since, now)
+      },
       diagnostics: () => lens.diagnostics(),
     })
     ctx.effect(() => dispose)

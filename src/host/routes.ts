@@ -5,7 +5,7 @@
 // caller ties route lifetime to the plugin via a cordis effect.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot } from '../shared/contract'
+import type { PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot, PerfStats } from '../shared/contract'
 
 /** The route registrar the harness webServer service exposes. */
 export interface RouteRegistrar {
@@ -21,7 +21,15 @@ export interface PerfService {
   snapshot(): PerfSnapshot
   control(body: PerfControlRequest): PerfSnapshot
   history(query: PerfHistoryQuery): readonly PerfSnapshot[]
+  /** Range aggregation over recorded windows; range is 1h | 24h | 7d. */
+  stats(range: string): PerfStats
   diagnostics(): PerfDiagnostics
+}
+
+/** Extract the range query from the request URL. */
+export function statsRangeOf(req: IncomingMessage): string {
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  return url.searchParams.get('range') ?? '24h'
 }
 
 function respond(res: ServerResponse, status: number, body: unknown): void {
@@ -52,8 +60,7 @@ export function historyQueryOf(req: IncomingMessage): PerfHistoryQuery {
 }
 
 /**
- * Register /api-perf/snapshot, /api-perf/control and /api-perf/history.
- * Returns a disposer that unregisters all three.
+ * Register the /api-perf/* routes. Returns a disposer that unregisters them all.
  */
 export function registerPerfRoutes(ws: RouteRegistrar, service: PerfService): () => void {
   const disposers = [
@@ -91,6 +98,17 @@ export function registerPerfRoutes(ws: RouteRegistrar, service: PerfService): ()
       handler: (req, res) => {
         try {
           respond(res, 200, { snapshots: service.history(historyQueryOf(req)) })
+        } catch (error) {
+          respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }),
+    ws.register({
+      kind: 'exact',
+      path: '/api-perf/stats',
+      handler: (req, res) => {
+        try {
+          respond(res, 200, service.stats(statsRangeOf(req)))
         } catch (error) {
           respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }
