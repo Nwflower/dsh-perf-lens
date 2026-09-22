@@ -29,6 +29,14 @@ export const DEFAULTS = {
    * a plugin that merely idled is not drawn as a flat line.
    */
   trendHideThreshold: 0.005,
+  /** Vitals reporting window; roughly one sampling window. */
+  vitalsWindowMs: 5_000,
+  /** Foreground reports kept for the mini-trend. */
+  vitalsRetain: 60,
+  /** A single long task at or above this counts as jank. */
+  jankLongTaskMs: 50,
+  /** A p95 frame gap at or above this counts as jank. */
+  jankRafGapMs: 50,
 } as const
 
 /** Sidebar entry id and the matching main-panel key (dsh 0.1.7 plugin-panel pattern). */

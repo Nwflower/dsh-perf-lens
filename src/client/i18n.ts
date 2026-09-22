@@ -47,6 +47,13 @@ const DICT = {
   hotspot: '热点函数（self 时间）',
   hotspotNone: '暂无热点数据（需开启深度模式并等待一个窗口）',
   selfTime: 'self',
+  vitals: '前台卡顿（浏览器）',
+  longTasks: '长任务',
+  rafGap: '帧间隔 p95',
+  janky: '卡顿',
+  smooth: '流畅',
+  noVitals: '等待浏览器上报…',
+  correlation: '相关性≠因果：浏览器无法把卡顿归因到具体插件，仅按时间并列',
 } as const
 
 export type MessageKey = keyof typeof DICT

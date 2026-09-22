@@ -5,8 +5,9 @@
 // caller ties route lifetime to the plugin via a cordis effect.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot, PerfStats } from '../shared/contract'
+import type { ClientVitals, PerfControlRequest, PerfDiagnostics, PerfHistoryQuery, PerfSnapshot, PerfStats, VitalsView } from '../shared/contract'
 import type { Hotspot } from '../shared/contract'
+import { parseVitals } from './vitals'
 
 /** The route registrar the harness webServer service exposes. */
 export interface RouteRegistrar {
@@ -29,6 +30,10 @@ export interface PerfService {
    * deep-mode window; null when nothing was collected.
    */
   hotspots(plugin: string): readonly Hotspot[] | null
+  /** Recent foreground vitals reports from the browser panel. */
+  vitals(): VitalsView
+  /** Store one report; returns the updated view. */
+  recordVitals(report: ClientVitals): VitalsView
   diagnostics(): PerfDiagnostics
 }
 
@@ -133,6 +138,26 @@ export function registerPerfRoutes(ws: RouteRegistrar, service: PerfService): ()
         try {
           const plugin = hotspotsQueryOf(req)
           respond(res, 200, { plugin, hotspots: service.hotspots(plugin) })
+        } catch (error) {
+          respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }),
+    ws.register({
+      kind: 'exact',
+      path: '/api-perf/vitals',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'POST') {
+            const report = parseVitals(await readJsonBody(req))
+            if (report === null) {
+              respond(res, 400, { ok: false, error: 'invalid vitals body' })
+              return
+            }
+            respond(res, 200, service.recordVitals(report))
+            return
+          }
+          respond(res, 200, service.vitals())
         } catch (error) {
           respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
         }

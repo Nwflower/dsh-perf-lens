@@ -24,6 +24,7 @@ import { buildOwnerIndex, harnessNodeModulesPrefix, type LoaderEntryFacts } from
 import { registerPerfRoutes } from './routes'
 import { Sampler } from './sampler'
 import { aggregateStats, rangeToSince } from './stats'
+import { VitalsStore } from './vitals'
 
 export const name = 'perf-lens'
 
@@ -111,6 +112,8 @@ export function apply(rawCtx: Context): void {
   const metrics = new GlobalMetrics()
   // Frame-level, in-memory only: this table has no persistence path by design.
   const hotspots = new HotspotStore()
+  // Browser vitals: short-lived, in-memory only, and never persisted either.
+  const vitals = new VitalsStore(DEFAULTS.vitalsRetain)
   const history = new HistoryStore({
     dir: historyDirOf(),
     retentionDays: 14,
@@ -173,6 +176,8 @@ export function apply(rawCtx: Context): void {
         return aggregateStats(history.read(resolved.since), resolved.range, resolved.since, now)
       },
       hotspots: (plugin) => hotspots.get(plugin),
+      vitals: () => vitals.view(),
+      recordVitals: (report) => vitals.record(report),
       diagnostics: () => lens.diagnostics(),
     })
     ctx.effect(() => dispose)

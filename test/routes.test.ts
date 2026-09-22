@@ -21,9 +21,10 @@ function fakeRes() {
   return { res, captured }
 }
 
-function fakeReq(url: string, body?: string) {
+function fakeReq(url: string, body?: string, method = 'GET') {
   return {
     url,
+    method,
     async *[Symbol.asyncIterator]() {
       if (body !== undefined) yield Buffer.from(body)
     },
@@ -46,6 +47,8 @@ function harness() {
       range: '24h', since: 0, windowCount: 0, sampledWindowMs: 0, coverage: 0, plugins: [],
     })),
     hotspots: vi.fn(() => null),
+    vitals: vi.fn(() => ({ latest: null, recent: [] })),
+    recordVitals: vi.fn(() => ({ latest: null, recent: [] })),
     diagnostics: vi.fn(() => ({
       lastError: null, windowStartedAt: 1, sampleCount: 9,
       ownerKeys: ['plugin:a'], ownerRules: [{ kind: 'plugin', name: 'a', prefix: '/a/' }],
@@ -65,6 +68,7 @@ describe('registerPerfRoutes', () => {
       '/api-perf/hotspots',
       '/api-perf/snapshot',
       '/api-perf/stats',
+      '/api-perf/vitals',
     ])
     h.dispose()
     expect(h.handlers.size).toBe(0)
@@ -113,6 +117,24 @@ describe('registerPerfRoutes', () => {
     h.handlers.get('/api-perf/hotspots')?.(fakeReq('/api-perf/hotspots?plugin=dsh-context'), res)
     expect(h.service.hotspots).toHaveBeenCalledWith('dsh-context')
     expect(JSON.parse(captured.body)).toEqual({ plugin: 'dsh-context', hotspots: null })
+  })
+
+  test('vitals GET returns the view and POST validates then records', async () => {
+    const h = harness()
+    const { res, captured } = fakeRes()
+    h.handlers.get('/api-perf/vitals')?.(fakeReq('/api-perf/vitals'), res)
+    expect(JSON.parse(captured.body)).toEqual({ latest: null, recent: [] })
+
+    const body = JSON.stringify({ longTaskCount: 1, longTaskTotalMs: 60, rafGapP95Ms: 20, windowMs: 5000, at: 7 })
+    const posted = fakeRes()
+    await h.handlers.get('/api-perf/vitals')?.(fakeReq('/api-perf/vitals', body, 'POST'), posted.res)
+    expect(h.service.recordVitals).toHaveBeenCalledWith({
+      longTaskCount: 1, longTaskTotalMs: 60, rafGapP95Ms: 20, windowMs: 5000, at: 7,
+    })
+
+    const bad = fakeRes()
+    await h.handlers.get('/api-perf/vitals')?.(fakeReq('/api-perf/vitals', '{}', 'POST'), bad.res)
+    expect(bad.captured.status).toBe(400)
   })
 
   test('stats forwards the range query, defaulting to 24h', () => {

@@ -7,7 +7,7 @@
 // on an explicit range change instead of every snapshot poll.
 
 import { useEffect, useRef, useState } from 'react'
-import type { Hotspot, PerfRange, PerfSnapshot, PerfStats } from '../shared/contract'
+import type { Hotspot, PerfRange, PerfSnapshot, PerfStats, VitalsView } from '../shared/contract'
 import { DEFAULTS, RANGE_MS } from '../shared/defaults'
 import { createPerfApi, type PerfApi } from './api'
 import { ControlBar } from './control-bar'
@@ -16,6 +16,7 @@ import { t } from './i18n'
 import { MetricsTable } from './metrics-table'
 import { Scoreboard } from './scoreboard'
 import { TrendChart } from './trend-chart'
+import { startVitalsReporter } from './vitals'
 
 /** Sparkline depth: enough to see a trend without retaining a profile. */
 const SERIES_LENGTH = 30
@@ -43,6 +44,7 @@ export function PerfPanel({ api }: PerfPanelProps) {
   const [deep, setDeep] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [hotspots, setHotspots] = useState<Readonly<Record<string, readonly Hotspot[]>>>({})
+  const [vitals, setVitals] = useState<VitalsView | null>(null)
 
   const pollMs = snapshot?.mode === 'continuous' ? DEFAULTS.continuousWindowMs : DEFAULTS.windowMs
 
@@ -96,6 +98,27 @@ export function PerfPanel({ api }: PerfPanelProps) {
       clearInterval(timer)
     }
   }, [client, range])
+
+  useEffect(() => {
+    let cancelled = false
+    client.vitals().then(
+      view => { if (!cancelled) setVitals(view) },
+      () => { /* vitals are an enhancement */ },
+    )
+    const stop = startVitalsReporter({
+      windowMs: DEFAULTS.vitalsWindowMs,
+      onReport: report => {
+        void client.postVitals(report).then(
+          view => { if (!cancelled) setVitals(view) },
+          () => { /* a dropped report must not disturb the board */ },
+        )
+      },
+    })
+    return () => {
+      cancelled = true
+      stop()
+    }
+  }, [client])
 
   const toggleHotspots = (moduleName: string): void => {
     setExpanded(previous => {
@@ -152,6 +175,35 @@ export function PerfPanel({ api }: PerfPanelProps) {
           void send({ deep: next })
         }}
       />
+      <div style={section}>
+        <div style={sectionHead}>
+          <strong>{t('vitals')}</strong>
+          {vitals?.latest === null || vitals === null
+            ? <span style={{ opacity: 0.6 }}>{t('noVitals')}</span>
+            : (() => {
+                const latest = vitals.latest
+                if (latest === null) return null
+                const janky = latest.longTaskTotalMs >= DEFAULTS.jankLongTaskMs || latest.rafGapP95Ms >= DEFAULTS.jankRafGapMs
+                return (
+                  <>
+                    <span>{janky ? t('janky') : t('smooth')}</span>
+                    <span style={{ opacity: 0.75 }}>{t('longTasks')} {latest.longTaskCount} / {latest.longTaskTotalMs.toFixed(1)}ms</span>
+                    <span style={{ opacity: 0.75 }}>{t('rafGap')} {latest.rafGapP95Ms.toFixed(1)}ms</span>
+                  </>
+                )
+              })()}
+        </div>
+        {vitals?.latest !== null && vitals !== null ? (
+          <div style={{ display: 'grid', gap: '2px' }}>
+            <div style={{ opacity: 0.7 }}>{t('correlation')}</div>
+            <div style={{ opacity: 0.85 }}>
+              {[...snapshot.plugins].sort((a, b) => b.cpuShare - a.cpuShare).slice(0, 3)
+                .map(row => `${row.moduleName} ${(row.cpuShare * 100).toFixed(1)}%`)
+                .join('  ·  ')}
+            </div>
+          </div>
+        ) : null}
+      </div>
       <MetricsTable
         rows={snapshot.plugins}
         series={series}

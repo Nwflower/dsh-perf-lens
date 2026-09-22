@@ -6,6 +6,9 @@
 // snapshots (ring buffer + JSONL) and the range.
 
 import type { PerfRange, PerfStats, PerfSnapshot, PluginStatsRow } from '../shared/contract'
+import { percentile } from '../shared/math'
+
+export { percentile }
 
 /** Range to a start timestamp. Unknown ranges fall back to 24h. */
 export function rangeToSince(range: string, now: number): { range: PerfRange; since: number } {
@@ -14,14 +17,6 @@ export function rangeToSince(range: string, now: number): { range: PerfRange; si
     case '7d': return { range: '7d', since: now - 7 * 24 * 60 * 60 * 1000 }
     default: return { range: '24h', since: now - 24 * 60 * 60 * 1000 }
   }
-}
-
-/** Nearest-rank percentile of an already sorted ascending array, 0..1. */
-export function percentile(sorted: readonly number[], fraction: number): number {
-  if (sorted.length === 0) return 0
-  const rank = Math.ceil(fraction * sorted.length)
-  const index = Math.min(sorted.length - 1, Math.max(0, rank - 1))
-  return sorted[index] ?? 0
 }
 
 interface Accumulator {

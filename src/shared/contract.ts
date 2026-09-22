@@ -136,6 +136,31 @@ export interface Hotspot {
   readonly samples: number
 }
 
+/**
+ * Foreground health of the browser tab the panel runs in, measured with the
+ * Long Tasks API and requestAnimationFrame gaps. This is the only way to see
+ * "is the UI stuttering"; the host CPU sampler cannot see the browser thread.
+ *
+ * HONESTY RULE: a browser long task cannot be attributed to a plugin bundle, so
+ * this is never presented as "plugin X caused the jank". It is time-correlated
+ * with host CPU at best, and the UI must say so.
+ */
+export interface ClientVitals {
+  readonly longTaskCount: number
+  readonly longTaskTotalMs: number
+  /** 95th percentile gap between animation frames; ~16.7ms is a healthy 60fps. */
+  readonly rafGapP95Ms: number
+  /** Wall time the sample covers. */
+  readonly windowMs: number
+  readonly at: number
+}
+
+/** Response of GET/POST /api-perf/vitals. */
+export interface VitalsView {
+  readonly latest: ClientVitals | null
+  readonly recent: readonly ClientVitals[]
+}
+
 /** Response of GET /api-perf/hotspots?plugin=... */
 export interface HotspotResponse {
   readonly plugin: string

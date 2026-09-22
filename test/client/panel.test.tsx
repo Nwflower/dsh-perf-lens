@@ -39,6 +39,8 @@ function apiOf(snapshot: PerfSnapshot): PerfApi {
     history: vi.fn(async () => [snapshot]),
     stats: vi.fn(async () => STATS),
     hotspots: vi.fn(async () => ({ plugin: 'pluginA', hotspots: null })),
+    vitals: vi.fn(async () => ({ latest: null, recent: [] })),
+    postVitals: vi.fn(async () => ({ latest: null, recent: [] })),
   }
 }
 
@@ -59,6 +61,8 @@ describe('PerfPanel', () => {
       history: vi.fn(async () => []),
       stats: vi.fn(async () => STATS),
       hotspots: vi.fn(async () => ({ plugin: 'pluginA', hotspots: null })),
+      vitals: vi.fn(async () => ({ latest: null, recent: [] })),
+      postVitals: vi.fn(async () => ({ latest: null, recent: [] })),
     }
     render(<PerfPanel api={api} />)
     await waitFor(() => { expect(screen.getByText(/boom/)).toBeTruthy() })
