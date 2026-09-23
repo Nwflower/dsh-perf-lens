@@ -14,6 +14,7 @@ import {
   attributeNode,
   buildNodeMap,
   buildParentMap,
+  ownerKey,
   type OwnerIndex,
   type ProfileNode,
 } from './attribute'
@@ -34,19 +35,35 @@ export function aggregateHotspots(
   index: OwnerIndex,
   intervalMs: number,
   limit: number = HOTSPOT_LIMIT,
+  override?: ReadonlyMap<number, string>,
 ): Map<string, Hotspot[]> {
   const nodesById = buildNodeMap(nodes)
   const parentOf = buildParentMap(nodes)
   const ownerOfNode = new Map<number, string | null>()
   const counts = new Map<string, Map<string, { frame: ProfileNode['callFrame']; samples: number }>>()
-  for (const nodeId of samples) {
-    let ownerKey = ownerOfNode.get(nodeId)
-    if (ownerKey === undefined) {
-      const owner = attributeNode(nodeId, nodesById, parentOf, index)
-      ownerKey = owner.kind === 'plugin' ? `plugin:${owner.name}` : null
-      ownerOfNode.set(nodeId, ownerKey)
+  for (let i = 0; i < samples.length; i++) {
+    const nodeId = samples[i]
+    if (nodeId === undefined) continue
+    // The async override (mechanism C) wins over the stack walk, exactly as in
+    // tallySamples, so the hotspot table stays consistent with the owner rows.
+    let owner: string | null
+    const forced = override?.get(i)
+    if (forced !== undefined) {
+      owner = forced
+    } else {
+      owner = ownerOfNode.get(nodeId) ?? null
+      if (!ownerOfNode.has(nodeId)) {
+        const resolved = attributeNode(nodeId, nodesById, parentOf, index)
+        // Every attributable owner gets a table, not just plugins: `self` and the
+        // harness packages are the rows the board is most likely to send the user
+        // to, and without their hotspots a big harness line cannot be explained
+        // (docs/design-overnight-analyzer.md §6.5, mechanism C). Idle and
+        // unattributed frames are owned by nothing, so they stay out.
+        owner = resolved.kind === 'idle' || resolved.kind === 'unattributed' ? null : ownerKey(resolved)
+        ownerOfNode.set(nodeId, owner)
+      }
     }
-    if (ownerKey === null) continue
+    if (owner === null) continue
     const node = nodesById.get(nodeId)
     if (node === undefined) continue
     const frame = node.callFrame
@@ -54,10 +71,10 @@ export function aggregateHotspots(
     const url = frame.url ?? ''
     const lineNumber = frame.lineNumber ?? 0
     const functionKey = `${functionName}\u0000${url}\u0000${lineNumber}`
-    let perFunction = counts.get(ownerKey)
+    let perFunction = counts.get(owner)
     if (perFunction === undefined) {
       perFunction = new Map()
-      counts.set(ownerKey, perFunction)
+      counts.set(owner, perFunction)
     }
     const existing = perFunction.get(functionKey)
     if (existing === undefined) perFunction.set(functionKey, { frame, samples: 1 })
@@ -84,7 +101,8 @@ export function aggregateHotspots(
 }
 
 /**
- * In-memory hotspot table keyed by `plugin:<name>`. There is deliberately no
+ * In-memory hotspot table keyed by owner key (`plugin:<name>`, `self`,
+ * `harness:<pkg>`, …). There is deliberately no
  * persistence path and no serializer: nothing here may reach the JSONL log.
  */
 export class HotspotStore {
@@ -95,9 +113,13 @@ export class HotspotStore {
     this.#byOwner = new Map(table)
   }
 
-  /** Hotspots for a module name, or null when none were collected. */
+  /**
+   * Hotspots for a module name or a raw owner key, or null when none were
+   * collected. Plugin rows pass their bare module name; the harness breakdown
+   * and the `self` row pass their owner key, which is looked up as-is.
+   */
   get(moduleName: string): readonly Hotspot[] | null {
-    return this.#byOwner.get(`plugin:${moduleName}`) ?? null
+    return this.#byOwner.get(`plugin:${moduleName}`) ?? this.#byOwner.get(moduleName) ?? null
   }
 
   clear(): void {

@@ -1,10 +1,10 @@
 // Ancestor-walk attribution for sampled call trees.
 //
-// Hard constraint (docs/evidence.md evidence 5): a sample is attributed to the
-// nearest PLUGIN frame on its ancestor stack, never to the file a frame is
-// defined in. Direct self-frame attribution drops almost every sample of a
-// plugin that calls a shared dependency into an unattributable bucket, which
-// makes the panel point at the wrong plugin.
+// AGENTS.md hard constraint 1 (docs/evidence.md, evidence 5): a sample is
+// charged to the nearest PLUGIN frame on its ancestor stack, never to the file
+// a frame is defined in. Charging the frame itself drops almost every sample of
+// a plugin that calls a shared dependency into a bucket nobody owns, and the
+// panel ends up blaming the wrong plugin.
 
 /**
  * Which part of the Node runtime a frame belongs to.
@@ -148,14 +148,6 @@ export function buildParentMap(nodes: readonly ProfileNode[]): Map<number, numbe
   return parentOf
 }
 
-/**
- * Walk from a sampled node up its ancestor stack to the nearest owner.
- *
- * A plugin or self frame anywhere above the sample wins outright. When no such
- * frame exists, a harness frame is preferred over a runtime frame: a harness
- * helper calling into node:fs is harness cost, not runtime cost. Only a stack
- * with neither resolves to unattributed.
- */
 /** Options shared by every frame-list walk. */
 export interface AttributeOptions {
   /**
@@ -257,11 +249,18 @@ export function attributeNode(
   return attributeFrames(frames, index, options)
 }
 
-/** Attribute a whole sample list and count samples per owner key. */
+/**
+ * Attribute a whole sample list and count samples per owner key.
+ *
+ * `override` maps a sample INDEX to an owner key and wins over the stack walk.
+ * Deep mode uses it to move samples that ran inside a plugin-owned async
+ * callback back to that plugin (mechanism C); see async-attribution.ts.
+ */
 export function tallySamples(
   samples: readonly number[],
   nodes: readonly ProfileNode[],
   index: OwnerIndex,
+  override?: ReadonlyMap<number, string>,
 ): Map<string, number> {
   const nodesById = buildNodeMap(nodes)
   const parentOf = buildParentMap(nodes)
@@ -269,11 +268,16 @@ export function tallySamples(
   // owner once and reuse it. The walk is the expensive part, not the counting.
   const ownerOfNode = new Map<number, string>()
   const counts = new Map<string, number>()
-  for (const nodeId of samples) {
-    let key = ownerOfNode.get(nodeId)
+  for (let i = 0; i < samples.length; i++) {
+    let key = override?.get(i)
     if (key === undefined) {
-      key = ownerKey(attributeNode(nodeId, nodesById, parentOf, index))
-      ownerOfNode.set(nodeId, key)
+      const nodeId = samples[i]
+      if (nodeId === undefined) continue
+      key = ownerOfNode.get(nodeId)
+      if (key === undefined) {
+        key = ownerKey(attributeNode(nodeId, nodesById, parentOf, index))
+        ownerOfNode.set(nodeId, key)
+      }
     }
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }

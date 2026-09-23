@@ -1,8 +1,8 @@
 // Inspector sampling state machine.
 //
-// Hard constraint (docs/AGENTS.md 5): Profiler.stop on a session that is not
-// recording throws ERR_INSPECTOR_COMMAND, so start/stop must be paired and the
-// active flags are the only authority for whether a stop is legal. Never call a
+// AGENTS.md hard constraint 5: Profiler.stop on a session that is not recording
+// throws ERR_INSPECTOR_COMMAND, so start and stop must be paired, and the
+// active flags are the only authority on whether a stop is legal. Never call
 // stop "just in case".
 
 import type { ProfileNode } from './attribute'
@@ -27,6 +27,14 @@ export interface HeapNode {
 export interface CpuProfileResult {
   readonly nodes: readonly ProfileNode[]
   readonly samples: readonly number[]
+  /** V8's per-sample deltas in microseconds, for async time-correlation. */
+  readonly timeDeltas?: readonly number[]
+  /** V8's boot-monotonic profile start/end, in microseconds. */
+  readonly startTime?: number
+  readonly endTime?: number
+  /** The sampler's own clock (performance.now()*1000) at start and stop. */
+  readonly startedAtUs?: number
+  readonly endedAtUs?: number
 }
 
 /** Result of a heap-sampling window: the live sampled tree at stop time. */
@@ -39,6 +47,8 @@ export interface SamplerOptions {
   readonly cpuIntervalUs: number
   /** Heap sampling interval in bytes; only used in deep mode. */
   readonly heapIntervalBytes: number
+  /** Monotonic microsecond clock; injectable for tests. */
+  readonly nowUs?: () => number
 }
 
 function post<T>(session: InspectorSession, method: string, params?: object): Promise<T> {
@@ -65,7 +75,14 @@ function parseCpuProfile(result: unknown): CpuProfileResult {
   const samples = Array.isArray(profile.samples)
     ? profile.samples.filter((sample): sample is number => typeof sample === 'number')
     : []
-  return { nodes, samples }
+  // The timing fields are only needed by deep-mode async correlation; a profile
+  // that lacks them degrades to stack-only attribution rather than failing.
+  const timeDeltas = Array.isArray(profile.timeDeltas)
+    ? profile.timeDeltas.filter((delta): delta is number => typeof delta === 'number')
+    : undefined
+  const startTime = typeof profile.startTime === 'number' ? profile.startTime : undefined
+  const endTime = typeof profile.endTime === 'number' ? profile.endTime : undefined
+  return { nodes, samples, timeDeltas, startTime, endTime }
 }
 
 function parseHeapProfile(result: unknown): HeapProfileResult {
@@ -80,11 +97,16 @@ export class Sampler {
   #cpuActive = false
   #heapActive = false
   #disposed = false
+  readonly #nowUs: () => number
+  #startedAtUs: number | undefined
+  #endedAtUs: number | undefined
 
   constructor(
     private readonly session: InspectorSession,
     private readonly options: SamplerOptions,
-  ) {}
+  ) {
+    this.#nowUs = options.nowUs ?? (() => performance.now() * 1000)
+  }
 
   get cpuActive(): boolean { return this.#cpuActive }
   get heapActive(): boolean { return this.#heapActive }
@@ -103,6 +125,7 @@ export class Sampler {
     await post(this.session, 'Profiler.enable')
     await post(this.session, 'Profiler.setSamplingInterval', { interval: intervalUs })
     await post(this.session, 'Profiler.start')
+    this.#startedAtUs = this.#nowUs()
     this.#cpuActive = true
   }
 
@@ -113,7 +136,9 @@ export class Sampler {
     // window is open when the profiler already rejected the call.
     this.#cpuActive = false
     const result = await post(this.session, 'Profiler.stop')
-    return parseCpuProfile(result)
+    this.#endedAtUs = this.#nowUs()
+    const profile = parseCpuProfile(result)
+    return { ...profile, startedAtUs: this.#startedAtUs, endedAtUs: this.#endedAtUs }
   }
 
   /** Begin a heap-sampling window (deep mode). */

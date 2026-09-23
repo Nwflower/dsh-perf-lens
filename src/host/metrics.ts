@@ -12,6 +12,8 @@ type IntervalHistogram = ReturnType<typeof monitorEventLoopDelay>
 export interface MetricsDeps {
   readonly memoryUsage: () => Pick<NodeJS.MemoryUsage, 'rss' | 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers'>
   readonly resourceUsage: () => { readonly fsRead: number; readonly fsWrite: number }
+  /** process.cpuUsage: cumulative microseconds of user + system CPU. */
+  readonly cpuUsage: () => { readonly user: number; readonly system: number }
   readonly now: () => number
 }
 
@@ -19,6 +21,7 @@ function defaultDeps(): MetricsDeps {
   return {
     memoryUsage: () => process.memoryUsage(),
     resourceUsage: () => process.resourceUsage(),
+    cpuUsage: () => process.cpuUsage(),
     now: () => Date.now(),
   }
 }
@@ -30,6 +33,8 @@ export class GlobalMetrics {
   #observer: PerformanceObserver | undefined
   #gcPauseMs = 0
   #fsOpsBaseline: number | undefined
+  /** process.cpuUsage at window start, for the process-level CPU delta. */
+  #cpuBaseline: { user: number; system: number } | undefined
 
   constructor(deps: MetricsDeps = defaultDeps()) {
     this.#deps = deps
@@ -49,6 +54,7 @@ export class GlobalMetrics {
     }
     const usage = this.#deps.resourceUsage()
     this.#fsOpsBaseline = usage.fsRead + usage.fsWrite
+    this.#cpuBaseline = this.#deps.cpuUsage()
   }
 
   /** Stop instrumentation. Safe to call twice. */
@@ -58,6 +64,7 @@ export class GlobalMetrics {
     this.#observer?.disconnect()
     this.#observer = undefined
     this.#fsOpsBaseline = undefined
+    this.#cpuBaseline = undefined
     this.#gcPauseMs = 0
   }
 
@@ -68,6 +75,16 @@ export class GlobalMetrics {
     const fsTotal = usage.fsRead + usage.fsWrite
     const fsOpsTotal = this.#fsOpsBaseline === undefined ? fsTotal : Math.max(0, fsTotal - this.#fsOpsBaseline)
     this.#fsOpsBaseline = fsTotal
+    // Process-level CPU for the window: the reading that separates "the host
+    // was genuinely idle" from "the sampler missed the work". The platform
+    // clock may quantize it (probe 08: ~15.6ms on Windows), so consumers only
+    // use it when it is comfortably above that granularity.
+    const cpuNow = this.#deps.cpuUsage()
+    const baseline = this.#cpuBaseline
+    const processCpuMs = baseline === undefined
+      ? 0
+      : Math.max(0, ((cpuNow.user - baseline.user) + (cpuNow.system - baseline.system)) / 1000)
+    this.#cpuBaseline = cpuNow
     const lagP99Ns = this.#histogram?.percentile(99) ?? 0
     const gcPauseMs = this.#gcPauseMs
     this.#gcPauseMs = 0
@@ -79,6 +96,7 @@ export class GlobalMetrics {
       arrayBuffers: memory.arrayBuffers,
       eventLoopLagP99Ms: Number.isFinite(lagP99Ns) ? lagP99Ns / 1e6 : 0,
       gcPauseMs,
+      processCpuMs,
       fsOpsTotal,
       sampleWindowMs,
       sampleCount,

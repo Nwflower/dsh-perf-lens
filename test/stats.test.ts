@@ -74,7 +74,22 @@ describe('aggregateStats', () => {
       windows: 3,
     })
     const b = stats.plugins.find(p => p.moduleName === 'b')
-    expect(b).toMatchObject({ avgCpuShare: 0.2, peakCpuShare: 0.3, cumulativeCpuMs: 4, windows: 2 })
+    // b is absent from the third window; absence counts as a zero window, so the
+    // average is over all three (persisted windows drop all-zero rows).
+    expect(b).toMatchObject({ avgCpuShare: 0.4 / 3, peakCpuShare: 0.3, cumulativeCpuMs: 4, windows: 2 })
+  })
+
+  test('a window without a row counts as zero in the average', () => {
+    const snapshots = [
+      snapshot(91_000, 5_000, [row('spiky', 0.5, 5)]),
+      snapshot(93_000, 5_000, []),
+      snapshot(95_000, 5_000, []),
+    ]
+    const stats = aggregateStats(snapshots, '24h', since, now)
+    const spiky = stats.plugins.find(p => p.moduleName === 'spiky')
+    expect(spiky?.avgCpuShare).toBeCloseTo(0.5 / 3, 10)
+    expect(spiky?.peakCpuShare).toBe(0.5)
+    expect(spiky?.windows).toBe(1)
   })
 
   test('coverage scales the estimate and never exceeds one', () => {
@@ -123,6 +138,19 @@ describe('aggregateTrend', () => {
     // b is absent from bucket 0's second window and all of bucket 1: zeros count.
     expect(b?.shares[0]).toBeCloseTo(0.15, 10)
     expect(b?.shares[1]).toBe(0)
+  })
+
+  test('carries the absolute basis per bucket, divided by sampled seconds', () => {
+    const snapshots = [
+      snapshot(1000, 5000, [row('a', 0.10, 5)]),
+      snapshot(2000, 5000, [row('a', 0.20, 15)]),
+      snapshot(3000, 5000, [row('a', 0.60, 30)]),
+    ]
+    const trend = aggregateTrend(snapshots, '24h', 0, 2)
+    const a = trend.series.find(s => s.moduleName === 'a')
+    // Bucket 0: (5 + 15) ms over (5 + 5) s = 2 ms/s. Bucket 1: 30 ms over 5 s.
+    expect(a?.cpuMsPerSec[0]).toBeCloseTo(2, 10)
+    expect(a?.cpuMsPerSec[1]).toBeCloseTo(6, 10)
   })
 
   test('downsamples to at most maxPoints and sorts by peak', () => {

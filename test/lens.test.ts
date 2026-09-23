@@ -4,7 +4,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { createOwnerIndex, type ProfileNode } from '../src/host/attribute'
 import { HotspotStore } from '../src/host/hotspots'
-import { collapseIoCounts, collapseOwnerCounts, continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, type LensDeps } from '../src/host/lens'
+import { collapseIoCounts, collapseOwnerCounts, continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, probesForActivity, type LensDeps } from '../src/host/lens'
 import type { Sampler } from '../src/host/sampler'
 import type { PerfSnapshot } from '../src/shared/contract'
 
@@ -22,12 +22,12 @@ const NODES = [
 ]
 const SAMPLES = [...Array<number>(200).fill(2), ...Array<number>(60).fill(5)]
 
-function makeHarness() {
+function makeHarness(index = INDEX) {
   const sleeps: number[] = []
   const records: PerfSnapshot[] = []
   let nowValue = 0
   const sampler = {
-    startCpu: vi.fn(async () => {}),
+    startCpu: vi.fn(async (_intervalUs?: number) => {}),
     stopCpu: vi.fn(async (): Promise<{ nodes: ProfileNode[]; samples: number[] }> => ({ nodes: NODES, samples: SAMPLES })),
     startHeap: vi.fn(async () => {}),
     stopHeap: vi.fn(async () => ({ head: { selfSize: 4096, children: [] } })),
@@ -65,7 +65,7 @@ function makeHarness() {
       { moduleName: 'pluginA', entryId: 'a', fiberPhase: 'active' },
       { moduleName: 'pluginB', entryId: 'b', fiberPhase: 'active' },
     ],
-    ownerIndex: () => INDEX,
+    ownerIndex: () => index,
     clock,
   }
   return {
@@ -306,6 +306,135 @@ describe('background profile', () => {
   })
 })
 
+describe('sentinel activity probing', () => {
+  // A recorded window is all idle; a probe sees real work. The loop must stop
+  // sleeping and take a fine window as soon as the probe says so.
+  const IDLE_RESULT = {
+    nodes: [{ id: 1, callFrame: { functionName: '(idle)', url: '' }, children: [] }],
+    samples: Array<number>(50).fill(1),
+  }
+  const ACTIVE_RESULT = {
+    nodes: [
+      { id: 1, callFrame: { url: '/plugins/pluginA/index.mjs' }, children: [2] },
+      { id: 2, callFrame: { url: '/shared/dep.mjs' }, children: [] },
+    ],
+    samples: Array<number>(50).fill(2),
+  }
+
+  test('reports the idle share without recording a window', async () => {
+    const h = makeHarness()
+    h.sampler.stopCpu.mockResolvedValue({
+      nodes: [
+        { id: 1, callFrame: { functionName: '(idle)', url: '' }, children: [] },
+        { id: 2, callFrame: { url: '/plugins/pluginA/index.mjs' }, children: [] },
+      ],
+      samples: [...Array<number>(95).fill(1), ...Array<number>(5).fill(2)],
+    })
+    const lens = new Lens(h.deps)
+    const idleShare = await lens.runSentinel()
+    expect(idleShare).toBeCloseTo(0.95, 5)
+    // A coarse window's shares are noise, so it must never reach the history.
+    expect(h.records).toHaveLength(0)
+    expect(h.sampler.startCpu).toHaveBeenCalledWith(DEFAULT_LENS_OPTIONS.sentinelCpuIntervalUs)
+    expect(h.sleeps).toContain(DEFAULT_LENS_OPTIONS.sentinelWindowMs)
+  })
+
+  test('probes only when duty has backed off after an idle window', () => {
+    expect(probesForActivity('duty', true, 0.99, null)).toBe(true)
+    expect(probesForActivity('duty', true, 0.1, null)).toBe(false)
+    expect(probesForActivity('background', true, 0.99, null)).toBe(false)
+    expect(probesForActivity('continuous', true, 0.99, null)).toBe(false)
+    expect(probesForActivity('duty', false, 0.99, null)).toBe(false)
+    expect(probesForActivity('duty', true, 0.99, 'boom')).toBe(false)
+  })
+
+  test('the duty loop takes a real window as soon as a probe finds activity', async () => {
+    const h = makeHarness()
+    const intervals: number[] = []
+    let lastInterval = 0
+    h.sampler.startCpu = vi.fn(async (intervalUs?: number) => {
+      lastInterval = intervalUs ?? 0
+      intervals.push(intervalUs ?? 0)
+    })
+    h.sampler.stopCpu = vi.fn(async () => (
+      lastInterval === DEFAULT_LENS_OPTIONS.sentinelCpuIntervalUs ? ACTIVE_RESULT : IDLE_RESULT
+    ))
+    const clock = {
+      sleep: async (): Promise<void> => { await new Promise<void>(resolve => { setTimeout(resolve, 0) }) },
+      now: () => 0,
+    }
+    const lens = new Lens({ ...h.deps, clock }, { ...DEFAULT_LENS_OPTIONS, sentinelIdleMs: 5 })
+    lens.start()
+    await new Promise<void>(resolve => { setTimeout(resolve, 40) })
+    lens.stop()
+    const probeAt = intervals.indexOf(DEFAULT_LENS_OPTIONS.sentinelCpuIntervalUs)
+    expect(probeAt).toBeGreaterThan(-1)
+    expect(intervals[probeAt + 1]).toBe(DEFAULT_LENS_OPTIONS.cpuIntervalUs)
+  })
+})
+
+describe('async re-attribution (mechanism C)', () => {
+  const ASYNC_INDEX = createOwnerIndex([
+    { kind: 'plugin', name: 'pluginA', prefix: '/plugins/pluginA/' },
+    { kind: 'harness', name: '@deepseek-ai/dsh', prefix: '/dsh/' },
+  ])
+  // Every sample is a harness frame, but all of them fall inside a window
+  // owned by pluginA: the work the plugin scheduled.
+  const HARNESS_ONLY = {
+    nodes: [{ id: 10, callFrame: { url: '/dsh/scheduler.js' }, children: [] }],
+    samples: Array<number>(10).fill(10),
+    timeDeltas: Array<number>(10).fill(1000),
+    startTime: 0,
+    endTime: 10_000,
+    startedAtUs: 0,
+    endedAtUs: 10_000,
+  }
+  const recorder = () => ({
+    enabled: false,
+    setOwnerIndex: vi.fn(),
+    enable: vi.fn(),
+    disable: vi.fn(),
+    take: vi.fn(() => ({
+      windows: [{ asyncId: 5, startUs: 0, endUs: 100_000 }],
+      ownerOf: new Map<number, string>([[5, 'plugin:pluginA']]),
+    })),
+  })
+
+  test('deep mode moves plugin-scheduled harness frames back to the plugin', async () => {
+    const h = makeHarness(ASYNC_INDEX)
+    h.sampler.stopCpu = vi.fn(async () => HARNESS_ONLY)
+    const lens = new Lens(
+      { ...h.deps, ownerIndex: () => ASYNC_INDEX, asyncAttribution: recorder() as unknown as LensDeps['asyncAttribution'] },
+      { ...DEFAULT_LENS_OPTIONS, deep: true },
+    )
+    const snapshot = await lens.runWindow()
+    expect(snapshot.plugins.find(row => row.moduleName === 'pluginA')?.cpuShare).toBe(1)
+    expect(snapshot.plugins.find(row => row.moduleName === 'harness')).toBeUndefined()
+    expect(lens.diagnostics().asyncWindowedSamples).toBe(10)
+    expect(lens.diagnostics().asyncReattributedSamples).toBe(10)
+  })
+
+  test('without deep mode the same window stays on harness', async () => {
+    const h = makeHarness(ASYNC_INDEX)
+    h.sampler.stopCpu = vi.fn(async () => HARNESS_ONLY)
+    const lens = new Lens({ ...h.deps, ownerIndex: () => ASYNC_INDEX })
+    const snapshot = await lens.runWindow()
+    expect(snapshot.plugins.find(row => row.moduleName === 'harness')?.cpuShare).toBe(1)
+    expect(lens.diagnostics().asyncReattributedSamples).toBe(0)
+  })
+
+  test('a profile without V8 timing fields degrades to stack attribution', async () => {
+    const h = makeHarness(ASYNC_INDEX)
+    h.sampler.stopCpu = vi.fn(async () => ({ nodes: HARNESS_ONLY.nodes, samples: HARNESS_ONLY.samples }))
+    const lens = new Lens(
+      { ...h.deps, ownerIndex: () => ASYNC_INDEX, asyncAttribution: recorder() as unknown as LensDeps['asyncAttribution'] },
+      { ...DEFAULT_LENS_OPTIONS, deep: true },
+    )
+    const snapshot = await lens.runWindow()
+    expect(snapshot.plugins.find(row => row.moduleName === 'harness')?.cpuShare).toBe(1)
+  })
+})
+
 describe('harness folding', () => {
   test('collapseOwnerCounts sums every harness subpackage into one owner', () => {
     const folded = collapseOwnerCounts(new Map([
@@ -351,3 +480,50 @@ describe('harness folding', () => {
   })
 })
 
+
+describe('harness breakdown (the ranking the fold hides)', () => {
+  const HARNESS_INDEX = createOwnerIndex([
+    { kind: 'harness', name: '@deepseek-ai/dsh-client-hmr', prefix: '/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-hmr/' },
+    { kind: 'harness', name: '@deepseek-ai/dsh-subprocess-local', prefix: '/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/' },
+    { kind: 'harness', name: '@deepseek-ai/dsh', prefix: '/npm/node_modules/@deepseek-ai/dsh/' },
+    { kind: 'plugin', name: 'pluginA', prefix: '/plugins/pluginA/' },
+  ])
+  const HARNESS_NODES: ProfileNode[] = [
+    { id: 1, callFrame: { url: '/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-hmr/lib/index.js' } },
+    { id: 2, callFrame: { url: '/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js' } },
+    { id: 3, callFrame: { url: '/npm/node_modules/@deepseek-ai/dsh/lib/bin.js' } },
+    { id: 4, callFrame: { url: '/plugins/pluginA/index.mjs' } },
+  ]
+  const HARNESS_SAMPLES = [
+    ...Array<number>(30).fill(1),
+    ...Array<number>(20).fill(2),
+    ...Array<number>(10).fill(3),
+    ...Array<number>(40).fill(4),
+  ]
+
+  test('keeps the sub-package ranking beside the folded harness row', async () => {
+    const h = makeHarness(HARNESS_INDEX)
+    h.sampler.stopCpu = vi.fn(async () => ({ nodes: HARNESS_NODES, samples: HARNESS_SAMPLES }))
+    const snapshot = await new Lens(h.deps).runWindow()
+    // The board still sees ONE folded harness row (60 of 100 active samples).
+    const folded = snapshot.plugins.find(row => row.moduleName === 'harness')
+    expect(folded?.cpuShare).toBeCloseTo(0.6, 5)
+    expect(snapshot.plugins.some(row => row.moduleName.startsWith('harness:'))).toBe(false)
+    // ...and the breakdown names the packages behind it, biggest first.
+    const names = (snapshot.harnessBreakdown ?? []).map(row => row.moduleName)
+    expect(names).toEqual([
+      'harness:@deepseek-ai/dsh-client-hmr',
+      'harness:@deepseek-ai/dsh-subprocess-local',
+      'harness:@deepseek-ai/dsh',
+    ])
+    const top = snapshot.harnessBreakdown?.[0]
+    expect(top?.cpuSelfMs).toBeCloseTo(30 * (DEFAULT_LENS_OPTIONS.cpuIntervalUs / 1000), 5)
+    expect(top?.cpuShare).toBeCloseTo(0.3, 5)
+  })
+
+  test('an owner with no harness cost produces no breakdown rows', async () => {
+    const h = makeHarness()
+    const snapshot = await new Lens(h.deps).runWindow()
+    expect(snapshot.harnessBreakdown).toEqual([])
+  })
+})

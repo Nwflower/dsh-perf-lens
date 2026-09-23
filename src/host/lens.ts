@@ -1,19 +1,20 @@
 // Orchestrator: one duty-cycled sampling window at a time, each window turned
 // into a snapshot that the panel polls and the history log appends.
 //
-// The duty cycle exists because sampling is not free (docs/evidence.md evidence
-// 8: both samplers at once cost +15%..+26% on compute-bound load). Continuous
-// mode trades that back only while the user is actually watching the board, and
-// is bounded by continuousMaxMs so it cannot be left on by accident.
+// The duty cycle exists because sampling is not free (docs/evidence.md,
+// evidence 8: both samplers at once cost +15% to +26% on a compute-bound load).
+// Continuous mode gives that saving up only while someone is watching the
+// panel, and continuousMaxMs ends it so it cannot be left on by accident.
 
-import type { GlobalMetricRow, PerfDiagnostics, PerfSnapshot, PluginMetricRow, SampleMode } from '../shared/contract'
+import type { GlobalMetricRow, HarnessBreakdownRow, PerfDiagnostics, PerfSnapshot, PluginMetricRow, SampleMode } from '../shared/contract'
 import { DEFAULTS } from '../shared/defaults'
 import { attributeFrameList, ownerKey, tallySamples, type OwnerIndex } from './attribute'
+import { correlateSamples, sampleTimesUs, type AsyncCorrelation, type AsyncWindowRecorder, type AsyncWindowSample } from './async-attribution'
 import type { HistoryStore } from './history'
 import type { IoTracker } from './io-tracker'
 import { aggregateHotspots, type HotspotStore } from './hotspots'
 import type { GlobalMetrics } from './metrics'
-import type { HeapNode, Sampler } from './sampler'
+import type { CpuProfileResult, HeapNode, Sampler } from './sampler'
 
 /** The plugin facts a metric row carries, independent of any measurement. */
 export interface PluginFacts {
@@ -32,10 +33,25 @@ export interface LensOptions {
   readonly backgroundCpuIntervalUs: number
   readonly backgroundWindowMs: number
   readonly backgroundIdleMs: number
+  /**
+   * Sentinel activity probing during the duty idle backoff: a cheap coarse
+   * window that cuts a long sleep short when the host starts working again.
+   */
+  readonly sentinelEnabled: boolean
+  readonly sentinelCpuIntervalUs: number
+  readonly sentinelWindowMs: number
+  readonly sentinelIdleMs: number
+  readonly sentinelActivityThreshold: number
   /** Deep mode enables heap sampling on top of CPU sampling. */
   readonly deep: boolean
   readonly heapIntervalBytes: number
   readonly persistHistory: boolean
+  /**
+   * Deep-mode only: re-attribute CPU samples that ran inside a plugin-owned
+   * async callback back to that plugin (mechanism C). Expensive, so it never
+   * runs outside deep mode.
+   */
+  readonly asyncAttribution: boolean
 }
 
 /** Time source, injectable so the duty cycle is testable without waiting. */
@@ -55,10 +71,15 @@ export interface LensDeps {
   readonly metrics: GlobalMetrics
   readonly history: HistoryStore
   /**
-   * In-memory hot-function table. Optional so attribution-only tests do not
-   * need it, and never persisted (docs/design.md §7).
+   * In-memory hot-function table. Optional so attribution-only tests can skip
+   * it; never persisted (docs/design.md §7).
    */
   readonly hotspots?: HotspotStore
+  /**
+   * Deep-mode async-context recorder for mechanism-C re-attribution. Optional:
+   * without it, attribution is stack-only exactly as before.
+   */
+  readonly asyncAttribution?: AsyncWindowRecorder
   /** Installed plugins, from ctx.loader.entries(). */
   readonly plugins: () => readonly PluginFacts[]
   /** Current path-prefix owner index. */
@@ -75,9 +96,15 @@ export const DEFAULT_LENS_OPTIONS: LensOptions = {
   backgroundCpuIntervalUs: DEFAULTS.backgroundCpuIntervalUs,
   backgroundWindowMs: DEFAULTS.backgroundWindowMs,
   backgroundIdleMs: DEFAULTS.backgroundIdleMs,
+  sentinelEnabled: DEFAULTS.sentinelEnabled,
+  sentinelCpuIntervalUs: DEFAULTS.sentinelCpuIntervalUs,
+  sentinelWindowMs: DEFAULTS.sentinelWindowMs,
+  sentinelIdleMs: DEFAULTS.sentinelIdleMs,
+  sentinelActivityThreshold: DEFAULTS.sentinelActivityThreshold,
   deep: false,
   heapIntervalBytes: 32 * 1024,
   persistHistory: true,
+  asyncAttribution: DEFAULTS.asyncAttribution,
 }
 
 function zeroGlobal(): GlobalMetricRow {
@@ -87,21 +114,23 @@ function zeroGlobal(): GlobalMetricRow {
   }
 }
 
-/** Aggregate heap-sampling selfSize by owner, walking the tree once. */
+/** Sum heap-sampling selfSize by owner, walking the tree once. */
 export function tallyHeap(root: HeapNode, index: OwnerIndex): Map<string, number> {
   const counts = new Map<string, number>()
-  const walk = (node: HeapNode, parents: (string | undefined)[]): void => {
-    const urls = [node.callFrame?.url, ...parents]
+  // `stack` is this node's URL followed by its ancestors', innermost first:
+  // the order attributeFrameList walks when it looks for the nearest owner.
+  const walk = (node: HeapNode, ancestors: readonly (string | undefined)[]): void => {
+    const stack = [node.callFrame?.url, ...ancestors]
     if (node.selfSize > 0) {
-      const key = ownerKey(attributeFrameList(urls, index))
+      const key = ownerKey(attributeFrameList(stack, index))
       counts.set(key, (counts.get(key) ?? 0) + node.selfSize)
     }
-    const childParents = [node.callFrame?.url, ...parents]
-    for (const child of node.children ?? []) walk(child, childParents)
+    for (const child of node.children ?? []) walk(child, stack)
   }
   walk(root, [])
   return counts
 }
+
 /**
  * Fold every `harness:<subpackage>` owner into one `harness` row.
  *
@@ -131,7 +160,6 @@ export function collapseIoCounts(
   return out
 }
 
-
 /**
  * Whether a continuous-mode budget has run out. Continuous mode must never be
  * left on by accident (design risk table), so the loop checks this every window
@@ -154,7 +182,27 @@ export function nextIdleWait(mode: SampleMode, idleMs: number, idleShare: number
   return Math.min(idleMs * DEFAULTS.idleBackoffFactor, DEFAULTS.idleBackoffMaxMs)
 }
 
-/** Duty-cycled sampler orchestrator. */
+/**
+ * Whether the loop should probe for activity during this idle wait.
+ *
+ * Only the duty profile backs off far enough to lose a spike (up to
+ * idleBackoffMaxMs). Probing in any other mode would be pointless (continuous)
+ * or would change a cadence the user explicitly chose (background), and a
+ * window that just failed must not add more profiler traffic.
+ */
+export function probesForActivity(
+  mode: SampleMode,
+  enabled: boolean,
+  lastIdleShare: number,
+  lastError: string | null,
+): boolean {
+  return enabled
+    && mode === 'duty'
+    && lastError === null
+    && lastIdleShare >= DEFAULTS.idleBackoffThreshold
+}
+
+/** Runs the sampling loop and publishes one snapshot per window. */
 export class Lens {
   readonly #deps: LensDeps
   readonly #options: LensOptions
@@ -167,6 +215,10 @@ export class Lens {
   #lastError: string | null = null
   #lastOwnerKeys: string[] = []
   #lastIdleShare = 0
+  /** Samples correlated to a plugin-owned async window in the last deep window. */
+  #lastAsyncWindowed = 0
+  /** Of those, samples moved from harness/runtime to a plugin. */
+  #lastAsyncReattributed = 0
   /** Resolver of the in-flight interruptible sleep, if any. */
   #wake: (() => void) | null = null
 
@@ -183,7 +235,7 @@ export class Lens {
   get running(): boolean { return this.#running }
   get options(): LensOptions { return this.#options }
 
-  /** Start the duty-cycle loop. */
+  /** Start the sampling loop. */
   start(): void {
     if (this.#running) return
     this.#running = true
@@ -234,6 +286,8 @@ export class Lens {
       sampleCount: this.#last.global.sampleCount,
       ownerKeys: [...this.#lastOwnerKeys],
       ownerRules,
+      asyncWindowedSamples: this.#lastAsyncWindowed,
+      asyncReattributedSamples: this.#lastAsyncReattributed,
     }
   }
 
@@ -243,24 +297,53 @@ export class Lens {
     const deep = this.#deep
     const windowMs = this.#windowMs()
     const startedAt = clock.now()
+    // The async recorder is the most expensive instrumentation in the plugin,
+    // so it exists only while a deep window is open.
+    const asyncRecorder = deep && this.#options.asyncAttribution ? this.#deps.asyncAttribution : undefined
     try {
       // Inside the try: a throw while resolving the owner index must still run
       // the finally (io cleanup) instead of escaping before it.
       this.#deps.metrics.start()
       this.#deps.io.setOwnerIndex(this.#deps.ownerIndex())
       this.#deps.io.enable()
+      if (asyncRecorder !== undefined) {
+        asyncRecorder.setOwnerIndex(this.#deps.ownerIndex())
+        asyncRecorder.enable()
+      }
       await this.#deps.sampler.startCpu(this.#cpuIntervalUs())
       if (deep) await this.#deps.sampler.startHeap()
       await clock.sleep(windowMs)
       const cpu = await this.#deps.sampler.stopCpu()
       const heap = deep ? await this.#deps.sampler.stopHeap() : null
-      const snapshot = this.#build(startedAt, windowMs, cpu, heap)
+      const asyncSample = asyncRecorder?.take()
+      const snapshot = this.#build(startedAt, windowMs, cpu, heap, asyncSample)
       this.#last = snapshot
       this.#deps.history.record(snapshot, this.#options.persistHistory)
       return snapshot
     } finally {
       this.#deps.io.disable()
+      asyncRecorder?.disable()
     }
+  }
+
+  /**
+   * One cheap activity probe: a short, coarse-interval CPU window.
+   *
+   * Returns the idle share (0..1), or 1 when no samples arrived. It deliberately
+   * does NOT record a snapshot: a coarse window holds only a handful of samples,
+   * so its per-plugin shares are noise (five samples reads as 100%) and would
+   * pollute the scoreboard. Its only consumer is the duty loop's decision to
+   * take a real window now instead of sleeping out the idle backoff.
+   */
+  async runSentinel(): Promise<number> {
+    await this.#deps.sampler.startCpu(this.#options.sentinelCpuIntervalUs)
+    await this.#clock().sleep(this.#options.sentinelWindowMs)
+    const cpu = await this.#deps.sampler.stopCpu()
+    if (cpu === null) return 1
+    const samples = cpu.samples
+    if (samples.length === 0) return 1
+    const counts = tallySamples(samples, cpu.nodes, this.#deps.ownerIndex())
+    return (counts.get('idle') ?? 0) / samples.length
   }
 
   /** Stop sampling and release the inspector session. */
@@ -287,33 +370,77 @@ export class Lens {
 
   /**
    * Sleep that a control change can cut short. `wait <= 0` still goes through the
-   * clock so the loop always yields a macrotask.
+   * clock so the loop always yields a macrotask. Returns why it ended so the
+   * sentinel loop can tell an elapsed slice from a wake caused by a control.
    */
-  #sleepInterruptible(ms: number): Promise<void> {
+  #sleepInterruptible(ms: number): Promise<'slept' | 'woken'> {
     const clock = this.#clock()
-    if (ms <= 0) return clock.sleep(0)
-    return new Promise<void>((resolve) => {
+    if (ms <= 0) return clock.sleep(0).then(() => 'slept' as const)
+    return new Promise<'slept' | 'woken'>((resolve) => {
       let settled = false
-      const finish = (): void => {
+      const finish = (result: 'slept' | 'woken'): void => {
         if (settled) return
         settled = true
         this.#wake = null
-        resolve()
+        resolve(result)
       }
-      this.#wake = finish
-      void clock.sleep(ms).then(finish)
+      this.#wake = () => { finish('woken') }
+      void clock.sleep(ms).then(() => { finish('slept') })
     })
+  }
+
+  /**
+   * Idle wait with optional sentinel probing.
+   *
+   * A plain long sleep is what makes a spike invisible for up to two minutes.
+   * When the last window was mostly idle, the wait is sliced and each slice is
+   * followed by a cheap probe; a probe that finds activity ends the wait so the
+   * loop takes a real window immediately. A control change still ends the wait
+   * at once, exactly like the unprobed sleep.
+   */
+  async #sleepWithSentinel(ms: number): Promise<void> {
+    if (!probesForActivity(this.#mode, this.#options.sentinelEnabled, this.#lastIdleShare, this.#lastError)) {
+      await this.#sleepInterruptible(ms)
+      return
+    }
+    let remaining = ms
+    while (remaining > 0) {
+      const slice = Math.min(this.#options.sentinelIdleMs, remaining)
+      const result = await this.#sleepInterruptible(slice)
+      if (result === 'woken') return
+      remaining -= slice
+      if (remaining <= 0 || !this.#running) return
+      let idleShare: number
+      try {
+        idleShare = await this.runSentinel()
+      } catch (error) {
+        // A broken probe is itself a reason to stop sleeping: return, and let
+        // the loop take a window so the failure surfaces through the normal path.
+        this.#lastError = error instanceof Error ? error.message : String(error)
+        return
+      }
+      if (idleShare < this.#options.sentinelActivityThreshold) return
+    }
   }
 
   #build(
     startedAt: number,
     windowMs: number,
-    cpu: { nodes: readonly import('./attribute').ProfileNode[]; samples: readonly number[] } | null,
+    cpu: CpuProfileResult | null,
     heap: { head: HeapNode } | null,
+    asyncSample?: AsyncWindowSample,
   ): PerfSnapshot {
     const index = this.#deps.ownerIndex()
     const samples = cpu?.samples ?? []
-    const rawCpuCounts = cpu === null ? new Map<string, number>() : tallySamples(samples, cpu.nodes, index)
+    // Mechanism-C correction: samples that ran inside a plugin-owned async
+    // callback but whose JS stack only shows harness frames move back to the
+    // plugin. Empty (and therefore a no-op) unless deep mode collected windows.
+    const asyncCorrelation = this.#asyncCorrelation(cpu, asyncSample, index)
+    this.#lastAsyncWindowed = asyncCorrelation.windowedSamples
+    this.#lastAsyncReattributed = asyncCorrelation.override.size
+    const rawCpuCounts = cpu === null
+      ? new Map<string, number>()
+      : tallySamples(samples, cpu.nodes, index, asyncCorrelation.override)
     const rawHeapCounts = heap === null ? new Map<string, number>() : tallyHeap(heap.head, index)
     // Rows use the folded view; diagnostics keep the raw keys so a specific
     // harness subpackage can still be found when attribution looks wrong.
@@ -351,7 +478,7 @@ export class Lens {
     // in-memory store only, never into the snapshot that history persists.
     if (this.#deep && cpu !== null) {
       this.#deps.hotspots?.replace(
-        aggregateHotspots(cpu.samples, cpu.nodes, index, this.#options.cpuIntervalUs / 1000),
+        aggregateHotspots(cpu.samples, cpu.nodes, index, this.#options.cpuIntervalUs / 1000, undefined, asyncCorrelation.override),
       )
     } else {
       this.#deps.hotspots?.clear()
@@ -364,7 +491,67 @@ export class Lens {
       plugins: rows,
       unattributedShare: (cpuCounts.get('unattributed') ?? 0) / denominator,
       selfShare: (cpuCounts.get('self') ?? 0) / denominator,
+      harnessBreakdown: this.#harnessBreakdown(rawCpuCounts, rawHeapCounts, ioPerOwner, activeSamples),
     }
+  }
+
+  /**
+   * Correlate this window's samples with plugin-owned async execution windows.
+   *
+   * Returns an empty correlation (stack-only attribution) when the recorder did
+   * not run, when no window was collected, or when the profile lacks the V8
+   * timing fields — a degraded path must never throw or guess.
+   */
+  #asyncCorrelation(
+    cpu: CpuProfileResult | null,
+    asyncSample: AsyncWindowSample | undefined,
+    index: OwnerIndex,
+  ): AsyncCorrelation {
+    if (cpu === null || asyncSample === undefined || asyncSample.windows.length === 0) {
+      return { override: new Map(), windowedSamples: 0 }
+    }
+    const { timeDeltas, startTime, endTime, startedAtUs, endedAtUs } = cpu
+    if (timeDeltas === undefined || startTime === undefined || endTime === undefined
+      || startedAtUs === undefined || endedAtUs === undefined) {
+      return { override: new Map(), windowedSamples: 0 }
+    }
+    const times = sampleTimesUs(startedAtUs, endedAtUs, startTime, endTime, timeDeltas)
+    return correlateSamples(cpu.samples, times, asyncSample.windows, asyncSample.ownerOf, cpu.nodes, index)
+  }
+
+  /**
+   * The harness ranking the fold would otherwise delete.
+   *
+   * Built from the RAW owner counts (the folded maps have already merged every
+   * `harness:<pkg>` into one key), sorted by absolute CPU so the line the user
+   * should act on is first, and capped so a 200-package install cannot grow the
+   * snapshot without bound.
+   */
+  #harnessBreakdown(
+    cpuCounts: ReadonlyMap<string, number>,
+    heapCounts: ReadonlyMap<string, number>,
+    ioPerOwner: ReadonlyMap<string, { readonly read: number; readonly write: number }>,
+    activeSamples: number,
+  ): HarnessBreakdownRow[] {
+    const keys = new Set<string>()
+    for (const key of cpuCounts.keys()) if (key.startsWith('harness:')) keys.add(key)
+    for (const key of heapCounts.keys()) if (key.startsWith('harness:')) keys.add(key)
+    for (const key of ioPerOwner.keys()) if (key.startsWith('harness:')) keys.add(key)
+    const rows: HarnessBreakdownRow[] = []
+    for (const key of keys) {
+      const cpuSamples = cpuCounts.get(key) ?? 0
+      const io = ioPerOwner.get(key)
+      rows.push({
+        moduleName: key,
+        cpuShare: activeSamples === 0 ? 0 : cpuSamples / activeSamples,
+        cpuSelfMs: cpuSamples * (this.#options.cpuIntervalUs / 1000),
+        liveHeapBytes: heapCounts.get(key) ?? 0,
+        fsReadOps: io?.read ?? 0,
+        fsWriteOps: io?.write ?? 0,
+      })
+    }
+    rows.sort((left, right) => right.cpuSelfMs - left.cpuSelfMs || right.liveHeapBytes - left.liveHeapBytes)
+    return rows.slice(0, DEFAULTS.harnessBreakdownLimit)
   }
 
   #row(
@@ -379,12 +566,11 @@ export class Lens {
   ): PluginMetricRow {
     const cpuSamples = cpuCounts.get(key) ?? 0
     const ioCounts = ioPerOwner.get(key)
-    const sampleCount = activeSamples
     return {
       moduleName,
       entryId,
       fiberPhase,
-      cpuShare: sampleCount === 0 ? 0 : cpuSamples / sampleCount,
+      cpuShare: activeSamples === 0 ? 0 : cpuSamples / activeSamples,
       cpuSelfMs: cpuSamples * (this.#options.cpuIntervalUs / 1000),
       liveHeapBytes: heapCounts.get(key) ?? 0,
       allocBytesPerSec: 0,
@@ -426,7 +612,7 @@ export class Lens {
       // After a failed window, never retry faster than 30s: a broken profiler or
       // owner index must not turn continuous mode into a hammering loop.
       const wait = this.#lastError === null ? nominal : Math.max(nominal, 30_000)
-      await this.#sleepInterruptible(wait)
+      await this.#sleepWithSentinel(wait)
     }
   }
 }

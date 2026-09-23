@@ -1,10 +1,10 @@
 // dsh-perf-lens host half: the composition root.
 //
 // Every collaborator is built here and tied to the plugin's lifetime through
-// cordis effects, so unload always stops sampling (docs/AGENTS.md 6). The
-// webServer service is optional and late-mounted: it is registered through
-// ctx.inject, never listed in `inject`, or a headless profile would fail to
-// activate the whole plugin.
+// cordis effects, so unloading always stops sampling (AGENTS.md hard
+// constraint 6). The webServer service is optional and mounted late: routes are
+// registered through ctx.inject rather than listed in `inject`, or a headless
+// profile would fail to activate the whole plugin.
 
 import { Session } from 'node:inspector'
 import { createRequire } from 'node:module'
@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PerfControlRequest } from '../shared/contract'
 import { DEFAULTS } from '../shared/defaults'
+import { AsyncWindowRecorder } from './async-attribution'
 import type { HostCtx, HostWebCtx } from './ctx'
 import { HistoryStore } from './history'
 import { HotspotStore } from './hotspots'
@@ -109,6 +110,8 @@ export function apply(rawCtx: Context): void {
     heapIntervalBytes: 32 * 1024,
   })
   const io = new IoTracker()
+  // Deep-mode only: async-context CPU re-attribution (mechanism C).
+  const asyncAttribution = new AsyncWindowRecorder()
   const metrics = new GlobalMetrics()
   // Frame-level, in-memory only: this table has no persistence path by design.
   const hotspots = new HotspotStore()
@@ -146,6 +149,7 @@ export function apply(rawCtx: Context): void {
       metrics,
       history,
       hotspots,
+      asyncAttribution,
       plugins,
       ownerIndex: () => buildOwnerIndex(factsOf(), { harnessPrefix }),
     },
@@ -173,12 +177,12 @@ export function apply(rawCtx: Context): void {
       stats: (range) => {
         const now = Date.now()
         const resolved = rangeToSince(range, now)
-        return aggregateStats(history.read(resolved.since), resolved.range, resolved.since, now)
+        return aggregateStats(history.summaries(resolved.since), resolved.range, resolved.since, now)
       },
       trend: (range) => {
         const now = Date.now()
         const resolved = rangeToSince(range, now)
-        return aggregateTrend(history.read(resolved.since), resolved.range, resolved.since, DEFAULTS.trendMaxPoints)
+        return aggregateTrend(history.summaries(resolved.since), resolved.range, resolved.since, DEFAULTS.trendMaxPoints)
       },
       hotspots: (plugin) => hotspots.get(plugin),
       vitals: () => vitals.view(),

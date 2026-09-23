@@ -86,6 +86,26 @@ describe('sampler start/stop pairing', () => {
     expect(await sampler.stopCpu()).toBeNull()
   })
 
+  test('carries V8 timing fields and the sampler clock for async correlation', async () => {
+    const ticks = [1000, 2500]
+    const { session } = mockSession({
+      'Profiler.stop': () => ({
+        ...CPU_PROFILE,
+        timeDeltas: [500, 500],
+        startTime: 100,
+        endTime: 1100,
+      }),
+    })
+    const sampler = new Sampler(session, { ...OPTIONS, nowUs: () => ticks.shift() ?? 0 })
+    await sampler.startCpu()
+    const profile = await sampler.stopCpu()
+    expect(profile?.timeDeltas).toEqual([500, 500])
+    expect(profile?.startTime).toBe(100)
+    expect(profile?.endTime).toBe(1100)
+    expect(profile?.startedAtUs).toBe(1000)
+    expect(profile?.endedAtUs).toBe(2500)
+  })
+
   test('a failed start leaves the window closed', async () => {
     const { session } = mockSession({
       'Profiler.start': () => { throw new Error('ERR_INSPECTOR_COMMAND') },

@@ -1,17 +1,21 @@
 // Retention semantics: a fixed-capacity ring for the live panel, one JSONL line
 // per window on disk, and pruning that never grows without bound.
 
-import { sep } from 'node:path'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, sep } from 'node:path'
 import { describe, expect, test } from 'vitest'
-import type { PerfSnapshot } from '../src/shared/contract'
+import type { PerfSnapshot, PluginMetricRow } from '../src/shared/contract'
 import {
   HistoryStore,
   historyFileName,
+  NODE_HISTORY_FS,
   parseSnapshot,
   RingBuffer,
   serializeSnapshot,
   type HistoryFs,
 } from '../src/host/history'
+import { aggregateStats, aggregateTrend } from '../src/host/stats'
 
 function snapshot(at: number): PerfSnapshot {
   return {
@@ -27,11 +31,24 @@ function snapshot(at: number): PerfSnapshot {
   }
 }
 
+/** A plugin row with every metric zero unless overridden. */
+function row(moduleName: string, overrides: Partial<PluginMetricRow> = {}): PluginMetricRow {
+  return {
+    moduleName, entryId: moduleName, fiberPhase: 'active', cpuShare: 0, cpuSelfMs: 0,
+    liveHeapBytes: 0, allocBytesPerSec: 0, fsReadOps: 0, fsWriteOps: 0,
+    fsReadBytes: 0, fsWriteBytes: 0, coverage: 0, timers: 0, listeners: 0, handles: 0,
+    diskFootprintBytes: 0,
+    ...overrides,
+  }
+}
+
 /** In-memory HistoryFs so retention is tested without touching the disk. */
 class MemoryFs implements HistoryFs {
   readonly files = new Map<string, { content: string; mtimeMs: number }>()
   /** mtime stamped onto files created from now on. */
   nowMs = 0
+  /** Every tail read, so a test can see what was (not) re-read. */
+  readonly tailReads: { path: string; position: number }[] = []
 
   mkdirSync(): void { /* directories are implicit */ }
 
@@ -49,6 +66,11 @@ class MemoryFs implements HistoryFs {
     return file.content
   }
 
+  readTailSync(path: string, position: number): Buffer {
+    this.tailReads.push({ path, position })
+    return Buffer.from(this.readFileSync(path)).subarray(position)
+  }
+
   readdirSync(path: string): string[] {
     const names: string[] = []
     for (const key of this.files.keys()) {
@@ -62,7 +84,7 @@ class MemoryFs implements HistoryFs {
   statSync(path: string): { size: number; mtimeMs: number } {
     const file = this.files.get(path)
     if (file === undefined) throw new Error('ENOENT')
-    return { size: file.content.length, mtimeMs: file.mtimeMs }
+    return { size: Buffer.byteLength(file.content), mtimeMs: file.mtimeMs }
   }
 
   unlinkSync(path: string): void {
@@ -89,6 +111,44 @@ describe('snapshot records', () => {
   test('round-trips through JSONL', () => {
     const value = snapshot(123)
     expect(parseSnapshot(serializeSnapshot(value))).toEqual(value)
+  })
+
+  test('the harness breakdown is live-only and never persisted', () => {
+    const value: PerfSnapshot = {
+      ...snapshot(1),
+      harnessBreakdown: [{
+        moduleName: 'harness:@deepseek-ai/dsh-client-hmr',
+        cpuShare: 0.1, cpuSelfMs: 1, liveHeapBytes: 0, fsReadOps: 0, fsWriteOps: 0,
+      }],
+    }
+    const line = serializeSnapshot(value)
+    // The log keeps the folded harness row, not ten sub-package rows per window.
+    expect(line).not.toContain('harnessBreakdown')
+    expect(parseSnapshot(line)?.harnessBreakdown).toBeUndefined()
+  })
+
+  test('drops all-zero rows and keeps every row with activity', () => {
+    const value: PerfSnapshot = {
+      ...snapshot(1),
+      plugins: [
+        row('idle-plugin'),
+        row('cpu-plugin', { cpuShare: 0.1, cpuSelfMs: 3 }),
+        row('io-plugin', { fsWriteOps: 2 }),
+        row('heap-plugin', { liveHeapBytes: 4096 }),
+      ],
+    }
+    const parsed = parseSnapshot(serializeSnapshot(value))
+    // Zero rows are the inventory restated, not a measurement: the log keeps
+    // only the rows a reader can tell apart from the plugin list.
+    expect(parsed?.plugins.map(plugin => plugin.moduleName)).toEqual([
+      'cpu-plugin', 'io-plugin', 'heap-plugin',
+    ])
+  })
+
+  test('round-trips an active row without loss', () => {
+    const active = row('active-plugin', { cpuShare: 0.25, cpuSelfMs: 7, fsReadOps: 3, liveHeapBytes: 99 })
+    const parsed = parseSnapshot(serializeSnapshot({ ...snapshot(1), plugins: [active] }))
+    expect(parsed?.plugins).toEqual([active])
   })
 
   test('ignores blank and malformed lines', () => {
@@ -152,5 +212,127 @@ describe('HistoryStore', () => {
     const deleted = store.prune(now)
     expect(deleted.length).toBeGreaterThanOrEqual(1)
     expect(fs.files.size).toBeLessThan(2)
+  })
+})
+
+describe('HistoryStore.summaries (the range endpoints read path)', () => {
+  const DAY = new Date('2026-09-05T00:00:00Z').getTime()
+  const at = (offsetMs: number): Date => new Date(DAY + offsetMs)
+  const windowAt = (offsetMs: number, plugins: PluginMetricRow[] = []): PerfSnapshot =>
+    ({ ...snapshot(DAY + offsetMs), plugins })
+  const store = (fs: MemoryFs, maxBytes = 1e9) =>
+    new HistoryStore({ dir: 'hist', retentionDays: 14, maxBytes }, fs)
+  const times = (history: HistoryStore, since?: number) =>
+    history.summaries(since).map(window => window.windowStartedAt - DAY)
+
+  test('feeds the aggregators exactly what a full read does', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    history.record(windowAt(0, [row('a', { cpuShare: 0.5, cpuSelfMs: 5 }), row('b', { cpuShare: 0.25, cpuSelfMs: 2 })]), true, at(5000))
+    history.record(windowAt(35_000, [row('a', { cpuShare: 0.1, cpuSelfMs: 1 })]), true, at(40_000))
+    history.record(windowAt(70_000, [row('b', { liveHeapBytes: 4096 })]), true, at(75_000))
+    const now = DAY + 80_000
+    expect(aggregateStats(history.summaries(DAY), '1h', DAY, now))
+      .toEqual(aggregateStats(history.read(DAY), '1h', DAY, now))
+    expect(aggregateTrend(history.summaries(DAY), '1h', DAY, 120))
+      .toEqual(aggregateTrend(history.read(DAY), '1h', DAY, 120))
+  })
+
+  test('parses each line once: later calls read only the appended tail', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    history.record(windowAt(0), true, at(5000))
+    history.record(windowAt(1000), true, at(6000))
+    expect(times(history)).toEqual([0, 1000])
+    const path = [...fs.files.keys()][0] ?? ''
+    const consumed = Buffer.byteLength(fs.files.get(path)?.content ?? '')
+
+    // Nothing new: no read at all.
+    expect(times(history)).toEqual([0, 1000])
+    expect(fs.tailReads).toEqual([{ path, position: 0 }])
+
+    history.record(windowAt(2000), true, at(7000))
+    expect(times(history)).toEqual([0, 1000, 2000])
+    expect(fs.tailReads).toEqual([{ path, position: 0 }, { path, position: consumed }])
+  })
+
+  test('a line still being written is picked up once it is finished', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    history.record(windowAt(0), true, at(5000))
+    const path = [...fs.files.keys()][0] ?? ''
+    const line = serializeSnapshot(windowAt(1000))
+    fs.appendFileSync(path, line.slice(0, 20))
+    expect(times(history)).toEqual([0])
+    fs.appendFileSync(path, line.slice(20) + '\n')
+    expect(times(history)).toEqual([0, 1000])
+  })
+
+  test('holds only rows with activity, including from windows logged before the writer dropped zeros', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    history.record(windowAt(0), true, at(5000))
+    const path = [...fs.files.keys()][0] ?? ''
+    // A legacy line: the full inventory, zeros included.
+    const legacy = { ...windowAt(1000), plugins: [row('idle'), row('busy', { cpuShare: 1, cpuSelfMs: 4 })] }
+    fs.appendFileSync(path, JSON.stringify(legacy) + '\n')
+    const [, last] = history.summaries()
+    expect(last?.plugins).toEqual([{ moduleName: 'busy', cpuShare: 1, cpuSelfMs: 4 }])
+  })
+
+  test('skips a malformed record instead of failing every later read', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    history.record(windowAt(0), true, at(5000))
+    const path = [...fs.files.keys()][0] ?? ''
+    fs.appendFileSync(path, '{"unexpected":true}\n{broken\n')
+    history.record(windowAt(1000), true, at(6000))
+    expect(times(history)).toEqual([0, 1000])
+  })
+
+  test('does not open day files that ended before the range starts', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    const old = DAY - 4 * 24 * 60 * 60 * 1000
+    history.record({ ...snapshot(old), plugins: [] }, true, new Date(old + 5000))
+    history.record(windowAt(0), true, at(5000))
+    expect(times(history, DAY)).toEqual([0])
+    expect(fs.tailReads.map(read => read.path)).toEqual([join('hist', historyFileName(at(0)))])
+  })
+
+  test('starts a replaced file over instead of reading it from a stale offset', () => {
+    const fs = new MemoryFs()
+    const history = store(fs)
+    history.record(windowAt(0), true, at(5000))
+    history.record(windowAt(1000), true, at(6000))
+    expect(times(history)).toEqual([0, 1000])
+    const path = [...fs.files.keys()][0] ?? ''
+    fs.files.set(path, { content: serializeSnapshot(windowAt(9000)) + '\n', mtimeMs: 0 })
+    expect(times(history)).toEqual([9000])
+  })
+
+  test('forgets a pruned file even if it regrows past the old offset before the next read', () => {
+    const fs = new MemoryFs()
+    const history = store(fs, 1)
+    history.record(windowAt(0), true, at(5000))
+    history.record(windowAt(1000), true, at(6000))
+    expect(times(history)).toEqual([0, 1000])
+    expect(history.prune(DAY)).toHaveLength(1)
+    for (const offset of [2000, 3000, 4000]) history.record(windowAt(offset), true, at(offset + 5000))
+    expect(times(history)).toEqual([2000, 3000, 4000])
+  })
+})
+
+describe('NODE_HISTORY_FS.readTailSync', () => {
+  test('returns the bytes from a position to the end of the file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'perf-lens-history-'))
+    try {
+      const path = join(dir, 'tail.jsonl')
+      writeFileSync(path, 'first\nsecond\n')
+      expect(NODE_HISTORY_FS.readTailSync(path, 6).toString('utf8')).toBe('second\n')
+      expect(NODE_HISTORY_FS.readTailSync(path, 13).length).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

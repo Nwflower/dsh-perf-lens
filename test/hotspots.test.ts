@@ -40,6 +40,23 @@ describe('aggregateHotspots', () => {
   test('an empty sample list yields an empty table', () => {
     expect(aggregateHotspots([], NODES, INDEX, 1).size).toBe(0)
   })
+
+  test('harness packages and self get their own tables, idle stays out', () => {
+    const index = createOwnerIndex([
+      { kind: 'harness', name: '@deepseek-ai/dsh-client-hmr', prefix: '/h/hmr' },
+      { kind: 'self', name: 'dsh-perf-lens', prefix: '/s/lens' },
+    ])
+    const nodes: ProfileNode[] = [
+      { id: 1, callFrame: { url: '', functionName: '(root)' }, children: [2, 3, 4] },
+      { id: 2, callFrame: { url: '/h/hmr/lib/index.js', functionName: 'tick', lineNumber: 5 } },
+      { id: 3, callFrame: { url: '/s/lens/lib/index.js', functionName: 'sample', lineNumber: 9 } },
+      { id: 4, callFrame: { url: '', functionName: '(idle)' } },
+    ]
+    const table = aggregateHotspots([2, 3, 4], nodes, index, 1)
+    expect(table.get('harness:@deepseek-ai/dsh-client-hmr')?.[0]?.functionName).toBe('tick')
+    expect(table.get('self')?.[0]?.functionName).toBe('sample')
+    expect(table.has('idle')).toBe(false)
+  })
 })
 
 describe('HotspotStore', () => {
@@ -50,6 +67,18 @@ describe('HotspotStore', () => {
     expect(store.get('pluginA')?.map(row => row.functionName)).toEqual(['doWork'])
     store.clear()
     expect(store.get('pluginA')).toBeNull()
+  })
+
+  test('resolves a raw owner key for the harness breakdown and self rows', () => {
+    const store = new HotspotStore()
+    store.replace(new Map([
+      ['harness:@deepseek-ai/dsh-client-hmr', [{ functionName: 'tick', url: '/h/hmr/lib/index.js', lineNumber: 5, selfMs: 1, samples: 1 }]],
+      ['self', [{ functionName: 'sample', url: '/s/lens/lib/index.js', lineNumber: 9, selfMs: 1, samples: 1 }]],
+    ]))
+    expect(store.get('harness:@deepseek-ai/dsh-client-hmr')?.[0]?.functionName).toBe('tick')
+    expect(store.get('self')?.[0]?.functionName).toBe('sample')
+    // The folded row aggregates packages, so it has no table of its own.
+    expect(store.get('harness')).toBeNull()
   })
 
   test('frame-level data never appears in a serialized snapshot', () => {

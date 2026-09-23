@@ -1,8 +1,8 @@
 // Per-plugin file-operation counting with zero patching.
 //
-// Hard constraint (docs/evidence.md evidence 3): monkey-patching node:fs is
-// silently bypassed by ESM named imports, so it can never be trusted for
-// attribution. async_hooks needs no patch: every async fs resource is created
+// AGENTS.md hard constraint 2 (docs/evidence.md, evidence 3): monkey-patching
+// node:fs is silently bypassed by ESM named imports, so it can never be trusted
+// for attribution. async_hooks needs no patch: every async fs resource is created
 // with the caller still on the stack, and that stack is what we attribute.
 //
 // Known limits (evidence 7): synchronous fs calls create no async resource and

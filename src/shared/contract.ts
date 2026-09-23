@@ -11,11 +11,11 @@ export type MetricQuality =
   /** Measured over a subset of call sites; must be shown with a coverage ratio. */
   | 'partial'
 
-/** Sampling mode of the lens, driven by panel visibility and user controls. */
+/** Sampling mode of the lens, chosen with the panel's controls. */
 export type SampleMode =
   /** Duty cycle: sample a window, sleep, repeat. The default. */
   | 'duty'
-  /** Back-to-back windows while the panel is open; bounded by continuousMaxMs. */
+  /** Back-to-back windows while someone is watching; ends after continuousMaxMs. */
   | 'continuous'
   /**
    * Low-rate always-on capture: a coarser sampling interval and a long sleep,
@@ -32,7 +32,7 @@ export interface PluginMetricRow {
   readonly entryId: string
   /** cordis fiber phase at collection time. */
   readonly fiberPhase: string
-  /** Share of process CPU over the window, 0..1. Sampled. */
+  /** Share of the window's active (non-idle) samples, 0..1. Sampled. */
   readonly cpuShare: number
   /** Attributed CPU milliseconds over the window. Sampled. */
   readonly cpuSelfMs: number
@@ -42,15 +42,19 @@ export interface PluginMetricRow {
   /** File operations, exact via async_hooks. */
   readonly fsReadOps: number
   readonly fsWriteOps: number
-  /** File bytes, partial: only I/O mediated by the harness ctx.fs service. */
+  /**
+   * File bytes, partial: only I/O mediated by the harness ctx.fs service.
+   * Planned; always 0 until the ctx.fs wrapper exists.
+   */
   readonly fsReadBytes: number
   readonly fsWriteBytes: number
-  /** Coverage 0..1 for the partial byte metrics above. */
+  /** Coverage 0..1 for the partial byte metrics above (0 until they exist). */
   readonly coverage: number
+  /** Planned: timer, listener and handle counts; always 0 for now. */
   readonly timers: number
   readonly listeners: number
   readonly handles: number
-  /** Bytes on disk owned by this plugin, exact via directory scan. */
+  /** Bytes on disk owned by this plugin, exact via directory scan. Planned; always 0. */
   readonly diskFootprintBytes: number
 }
 
@@ -66,6 +70,17 @@ export interface GlobalMetricRow {
   /** Process-level fs operation count, exact (process.resourceUsage). */
   readonly fsOpsTotal: number
   readonly sampleWindowMs: number
+  /**
+   * CPU actually consumed by the whole process during the window, in
+   * milliseconds (user + system, from process.cpuUsage). Exact apart from the
+   * platform clock's granularity (Windows ticks at ~15.6ms), and the one
+   * process-level reading that says whether a quiet window was quiet.
+   *
+   * Optional because records written before this field existed lack it, and
+   * because a platform may not expose it; consumers must treat absence as
+   * "unknown", never as zero.
+   */
+  readonly processCpuMs?: number
   /** Total CPU-profile samples in the window, including idle. */
   readonly sampleCount: number
   /**
@@ -84,8 +99,37 @@ export interface PerfSnapshot {
   readonly plugins: readonly PluginMetricRow[]
   /** Share of samples that resolved to no owner, 0..1. Surfaced, never hidden. */
   readonly unattributedShare: number
-  /** Own overhead of the lens over the window, 0..1. Excluded from plugin rows. */
+  /** The lens's own share of the window, 0..1. Never charged to a plugin; the `self` row carries it. */
   readonly selfShare: number
+  /**
+   * Top harness internal packages by sampled CPU, biggest first.
+   *
+   * The fold into one `harness` row is deliberate — 200+ internal packages
+   * would bury the real consumers — but it also deletes the only actionable
+   * ranking: which internal package costs what (docs/design-overnight-analyzer
+   * §6.5). The host keeps the top few here so the panel can show them under the
+   * harness line without re-flooding the table.
+   *
+   * Live snapshots only: history strips it (see history.serializeSnapshot), so
+   * the JSONL log keeps one folded row per window instead of ten. Snapshots
+   * replayed from disk therefore have it absent.
+   */
+  readonly harnessBreakdown?: readonly HarnessBreakdownRow[]
+}
+
+/**
+ * One harness internal package, measured on the same basis as a plugin row.
+ * Deliberately a lighter shape than PluginMetricRow: a harness package has no
+ * loader entry, fiber phase, coverage or allocation figure to report.
+ */
+export interface HarnessBreakdownRow {
+  /** Raw owner key, e.g. `harness:@deepseek-ai/dsh-client-hmr`. */
+  readonly moduleName: string
+  readonly cpuShare: number
+  readonly cpuSelfMs: number
+  readonly liveHeapBytes: number
+  readonly fsReadOps: number
+  readonly fsWriteOps: number
 }
 
 /** Body of POST /api-perf/control. */
@@ -107,9 +151,12 @@ export interface PerfHistoryQuery {
 export type PerfRange = '1h' | '24h' | '7d'
 
 /**
- * Per-plugin aggregate over a time range. avg / peak / p95 use the same
- * active-sample denominator as a single window's cpuShare, so a plugin's
- * average is comparable to the number the table shows live.
+ * Per-plugin aggregate over a time range.
+ *
+ * Shares use the same active-sample denominator as a single window's cpuShare.
+ * `avgCpuShare` divides by every window in range (a window with no row counts
+ * as zero, because persisted windows drop all-zero rows); `peakCpuShare` and
+ * `p95CpuShare` are over the windows the plugin was actually active in.
  */
 export interface PluginStatsRow {
   readonly moduleName: string
@@ -125,7 +172,7 @@ export interface PluginStatsRow {
   readonly estimatedCpuMs: number
   /** Sampled window time / range wall time, 0..1. */
   readonly coverage: number
-  /** Windows in which this plugin had a row. */
+  /** Windows in which this plugin had a row (i.e. showed any activity). */
   readonly windows: number
 }
 
@@ -187,11 +234,22 @@ export interface PerfStats {
   readonly plugins: readonly PluginStatsRow[]
 }
 
-/** One plugin's CPU-share line over the trend's points. */
+/** One plugin's line over the trend's points, in both cost bases. */
 export interface PerfTrendSeries {
   readonly moduleName: string
-  /** One averaged share per point, aligned with PerfTrend.times. */
+  /**
+   * One averaged share per point, aligned with PerfTrend.times. Share of
+   * ACTIVE samples: on an idle host this is inflated
+   * (docs/design-overnight-analyzer.md §6.5), so it is the
+   * shape view, not the cost view.
+   */
   readonly shares: readonly number[]
+  /**
+   * The same points as sampled CPU milliseconds per second of sampled wall
+   * time — the comparable, actionable figure. Present on every series so the
+   * chart can switch bases without a second request.
+   */
+  readonly cpuMsPerSec: readonly number[]
 }
 
 /**
@@ -235,4 +293,11 @@ export interface PerfDiagnostics {
   readonly ownerKeys: readonly string[]
   /** Path-prefix rules the owner index resolved. */
   readonly ownerRules: readonly OwnerRuleView[]
+  /**
+   * Deep mode only: samples that fell inside a plugin-owned async execution
+   * window, and how many of those were moved off harness/runtime back to the
+   * plugin (mechanism C). Both are 0 when async attribution did not run.
+   */
+  readonly asyncWindowedSamples?: number
+  readonly asyncReattributedSamples?: number
 }
