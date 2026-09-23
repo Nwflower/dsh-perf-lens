@@ -460,4 +460,5 @@ node:fs 加载钩子字节级磁盘 I/O + 子进程采样（dsh-subprocess-local
 | 15 | 静态折叠 | 本窗口 cpu/heap/fs/alloc 全为 0 的行折叠为「静态 N 个」，按组可展开；这是**逐窗口判定**，不是永久标签 |
 | 16 | 后台采样档 | 新增 `SampleMode='background'`：1000µs 间隔 / 2s 窗口 / 120s 睡眠，低采样率常驻，面板关闭也在采集并落 JSONL |
 | 17 | sparkline 回填 | 面板挂载时用 `/api-perf/trend` 的最近 30 点回填序列；此前序列只活在组件 state 里，刷新即空 |
+| 18 | runtime 细分 | `runtime` 不再是一行：按 `runtime:gc` / `runtime:native` / `runtime:node` / `runtime:event-loop` 分列，残差留 `runtime`。依据 [证据 9](evidence.md#证据-9runtime-桶的构成必须细分)：该桶实测 19% GC、14% node 内部、若干原生帧 |
 

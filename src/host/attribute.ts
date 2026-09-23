@@ -6,12 +6,22 @@
 // plugin that calls a shared dependency into an unattributable bucket, which
 // makes the panel point at the wrong plugin.
 
+/**
+ * Which part of the Node runtime a frame belongs to.
+ *
+ * "runtime" used to be one opaque row, but a live probe showed it is a mix:
+ * GC (19%), node internals (14%), unnamed native/libuv frames, and the
+ * program root. Splitting it answers "is my host GC-bound or syscall-bound?",
+ * which one row cannot.
+ */
+export type RuntimeKind = 'gc' | 'native' | 'node' | 'event-loop' | 'other'
+
 /** How a single frame's URL resolves against the owner index. */
 export type FrameOwner =
   | { readonly kind: 'plugin'; readonly name: string }
   | { readonly kind: 'harness'; readonly name: string }
   | { readonly kind: 'self'; readonly name: string }
-  | { readonly kind: 'runtime' }
+  | { readonly kind: 'runtime'; readonly name: RuntimeKind }
   /**
    * Wall time the profiler sampled while the thread was idle. Kept separate
    * from runtime: counting it as runtime made an idle host look like ~90%
@@ -54,7 +64,8 @@ export function ownerKey(owner: FrameOwner): string {
     case 'plugin': return `plugin:${owner.name}`
     case 'harness': return `harness:${owner.name}`
     case 'self': return 'self'
-    case 'runtime': return 'runtime'
+    // `other` stays the plain residual bucket; the named kinds get their own row.
+    case 'runtime': return owner.name === 'other' ? 'runtime' : `runtime:${owner.name}`
     case 'idle': return 'idle'
     case 'unattributed': return 'unattributed'
   }
@@ -78,13 +89,31 @@ export function createOwnerIndex(rules: readonly OwnerRule[]): OwnerIndex {
 // synthetic roots the V8 profiler emits.
 const RUNTIME_URL = /^(?:node:|internal\/|native|\(root\)|\(program\)|\(idle\)|\(anonymous\)|\()/
 
+/**
+ * Classify an empty-URL frame by its function name.
+ *
+ * Observed live: libuv/native work shows up as an empty URL with a real name
+ * (`fstat`, `writeBuffer`, `dispatch`), GC as `(garbage collector)`, and the
+ * profiler's synthetic roots as `(root)` / `(program)`.
+ */
+export function runtimeKindOfName(functionName: string | undefined): RuntimeKind {
+  if (functionName === undefined || functionName === '') return 'other'
+  if (functionName === '(garbage collector)') return 'gc'
+  if (functionName === '(root)' || functionName === '(program)') return 'event-loop'
+  if (functionName.startsWith('(')) return 'other'
+  return 'native'
+}
+
 /** Classify one call frame against the owner index. */
 export function classifyFrame(frame: FrameLike, index: OwnerIndex): FrameOwner {
   // The V8 profiler's idle node has an empty URL; its function name is the only
   // marker that distinguishes it from real native work.
   if (frame.functionName === '(idle)') return { kind: 'idle' }
   const url = frame.url
-  if (url === undefined || url === '' || RUNTIME_URL.test(url)) return { kind: 'runtime' }
+  if (url === undefined || url === '') {
+    return { kind: 'runtime', name: runtimeKindOfName(frame.functionName) }
+  }
+  if (RUNTIME_URL.test(url)) return { kind: 'runtime', name: runtimeKindOfUrl(url) }
   const normalized = normalizePath(url)
   for (const rule of index.rules) {
     if (normalized.startsWith(rule.prefix)) return { kind: rule.kind, name: rule.name }
@@ -95,6 +124,14 @@ export function classifyFrame(frame: FrameLike, index: OwnerIndex): FrameOwner {
 /** Classify one frame URL (no function name available, e.g. a captured stack). */
 export function classifyFrameUrl(url: string | undefined, index: OwnerIndex): FrameOwner {
   return classifyFrame({ url }, index)
+}
+
+/** Classify a runtime frame URL that is not plugin code. */
+export function runtimeKindOfUrl(url: string): RuntimeKind {
+  if (url === '(root)' || url === '(program)') return 'event-loop'
+  if (url.startsWith('node:') || url.startsWith('internal/')) return 'node'
+  if (url === 'native') return 'native'
+  return 'other'
 }
 
 /** Index nodes by id for O(1) lookup during the walk. */

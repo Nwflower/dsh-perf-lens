@@ -7,7 +7,7 @@
 
 import type { PerfStats, PluginMetricRow } from '../shared/contract'
 import { formatPercent } from './format'
-import { t } from './i18n'
+import { displayOwner, t } from './i18n'
 import { Sparkline } from './sparkline'
 
 export interface PluginCardsProps {
@@ -42,7 +42,7 @@ export function PluginCards({ rows, series, stats, limit = 6 }: PluginCardsProps
           <div key={row.entryId === '' ? row.moduleName : row.entryId} style={card}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'baseline' }}>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '130px' }}>
-                {row.moduleName}
+                {displayOwner(row.moduleName)}
               </span>
               <strong>{formatPercent(row.cpuShare)}</strong>
             </div>

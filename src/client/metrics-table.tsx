@@ -11,7 +11,7 @@ import type { Hotspot, PerfStats, PluginMetricRow } from '../shared/contract'
 import { groupRows, groupShareOf, type PluginGroupId } from '../shared/grouping'
 import { CoverageBadge } from './coverage-badge'
 import { formatBytes, formatOps, formatPercent } from './format'
-import { t } from './i18n'
+import { displayOwner, t } from './i18n'
 import { Sparkline } from './sparkline'
 
 type SortKey = 'cpuShare' | 'liveHeapBytes' | 'fs' | 'allocBytesPerSec'
@@ -96,7 +96,7 @@ export function MetricsTable({
       <Fragment key={row.entryId === '' ? row.moduleName : row.entryId}>
         <tr>
           <td style={nameCell} onClick={clickable ? () => { onToggle(row.moduleName) } : undefined}>
-            {clickable ? (isOpen ? '▾ ' : '▸ ') : ''}{row.moduleName}
+            {clickable ? (isOpen ? '▾ ' : '▸ ') : ''}{displayOwner(row.moduleName)}
           </td>
           <td style={cell}>{formatPercent(row.cpuShare)}</td>
           <td style={cell}>{aggregated === undefined ? '—' : formatPercent(aggregated.avgCpuShare)}</td>

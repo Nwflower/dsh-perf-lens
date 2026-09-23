@@ -66,6 +66,10 @@ const DICT = {
   smooth: '流畅',
   noVitals: '等待浏览器上报…',
   correlation: '相关性≠因果：浏览器无法把卡顿归因到具体插件，仅按时间并列',
+  runtimeGc: 'GC 回收',
+  runtimeNative: '原生 / libuv',
+  runtimeNode: 'node 内部',
+  runtimeEventLoop: '事件循环',
 } as const
 
 export type MessageKey = keyof typeof DICT
@@ -73,4 +77,21 @@ export type MessageKey = keyof typeof DICT
 /** Translate one panel message. */
 export function t(key: MessageKey): string {
   return DICT[key]
+}
+
+/**
+ * Human name for an owner row. Runtime subkinds get a label; plugin rows keep
+ * their module name.
+ */
+export function displayOwner(moduleName: string): string {
+  switch (moduleName) {
+    case 'runtime': return DICT.runtime
+    case 'runtime:gc': return DICT.runtimeGc
+    case 'runtime:native': return DICT.runtimeNative
+    case 'runtime:node': return DICT.runtimeNode
+    case 'runtime:event-loop': return DICT.runtimeEventLoop
+    case 'harness': return DICT.harness
+    case 'self': return DICT.self
+    default: return moduleName
+  }
 }

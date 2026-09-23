@@ -20,7 +20,7 @@ export interface PluginGroup {
 
 /** Which section an owner belongs to. */
 export function groupIdOf(moduleName: string): PluginGroupId {
-  if (moduleName === 'runtime') return 'runtime'
+  if (moduleName === 'runtime' || moduleName.startsWith('runtime:')) return 'runtime'
   if (moduleName === 'self') return 'self'
   if (moduleName === 'harness' || moduleName.startsWith('harness:')) return 'harness'
   if (moduleName === 'unattributed' || moduleName === 'idle') return 'other'

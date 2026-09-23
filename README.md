@@ -116,5 +116,6 @@ loader 的 `ctx.baseUrl` 是**目录 file URL**（不是插件路径）；连续
   - [x] 明细表分组渲染 + 平均/峰值列
   - [x] 后台采样档 SampleMode='background'（1000µs / 2s / 120s）
   - [x] sparkline 序列用 /api-perf/trend 回填，刷新不再清零
-  - [x] 127 项单测 + 四门禁全绿
+  - [x] runtime 细分：GC / 原生 / node 内部 / 事件循环分列（依据证据 9）
+  - [x] 130 项单测 + 四门禁全绿
 - [ ] Phase 1 收尾：目录字节扫描 / 自身开销自测量 / 定时器与句柄计数 / ctx.fs 字节包装

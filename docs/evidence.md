@@ -266,3 +266,23 @@ node 06-async-hooks-fs.mjs
 ```
 
 全部脚本在临时目录下创建自己的测试文件，运行结束后自行清理。
+
+## 证据 9：`runtime` 桶的构成——必须细分
+
+面板曾把无插件栈帧的样本全部记为一行 `runtime`。实机上面板显示它常驻榜首
+（平均 36.8%、峰值 100%），这回答不了任何问题：GC 和 syscall 是两种完全不同的优化方向。
+
+探针：[probes/07-runtime-composition.mjs](../probes/07-runtime-composition.mjs)
+（Node v24，3079 个样本，250µs 间隔，3s 混合负载）。
+
+| 叶帧 | 占 runtime 桶 | 归类 |
+| --- | --- | --- |
+| `(idle)` @ 空 url | 54.7% | `idle`（已在活动样本分母中剔除，不属于 runtime） |
+| `(garbage collector)` @ 空 url | 19.2% | `runtime:gc` |
+| `write` @ `node:string_decoder` 等 node 内部 | 13.7% + 长尾 | `runtime:node` |
+| `fstat` / `writeBuffer` / `close` @ 空 url | 长尾 | `runtime:native` |
+| `(program)` @ 空 url | 4.1% | `runtime:event-loop` |
+
+结论：空 url + 有函数名 = 原生/libuv 帧；`node:` 与 `internal/` = node 内部；
+`(garbage collector)` = GC；`(root)` / `(program)` = 事件循环/程序根；其余为 `runtime` 残差。
+由 `attribute.ts` 的 `runtimeKindOfName` / `runtimeKindOfUrl` 实现，单测锁定。

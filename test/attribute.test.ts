@@ -13,6 +13,7 @@ import {
   classifyFrameUrl,
   createOwnerIndex,
   normalizePath,
+  ownerKey,
   tallySamples,
   type OwnerIndex,
   type ProfileNode,
@@ -106,8 +107,23 @@ describe('idle separation', () => {
     expect(classifyFrame({ url: '', functionName: '(idle)' }, INDEX)).toEqual({ kind: 'idle' })
   })
 
-  test('a native frame with a name but no URL stays runtime', () => {
-    expect(classifyFrame({ url: '', functionName: 'dispatch' }, INDEX)).toEqual({ kind: 'runtime' })
+  test('a native frame with a name but no URL is the native runtime kind', () => {
+    expect(classifyFrame({ url: '', functionName: 'dispatch' }, INDEX)).toEqual({ kind: 'runtime', name: 'native' })
+  })
+
+  test('GC and the synthetic program root get their own runtime kinds', () => {
+    expect(classifyFrame({ url: '', functionName: '(garbage collector)' }, INDEX)).toEqual({ kind: 'runtime', name: 'gc' })
+    expect(classifyFrame({ url: '', functionName: '(root)' }, INDEX)).toEqual({ kind: 'runtime', name: 'event-loop' })
+    expect(classifyFrame({ url: '', functionName: '(program)' }, INDEX)).toEqual({ kind: 'runtime', name: 'event-loop' })
+    expect(classifyFrame({ url: '', functionName: undefined }, INDEX)).toEqual({ kind: 'runtime', name: 'other' })
+  })
+
+  test('runtime subkinds reach owner keys as distinct rows', () => {
+    expect(ownerKey(classifyFrame({ url: 'node:fs', functionName: 'readFile' }, INDEX))).toBe('runtime:node')
+    expect(ownerKey(classifyFrame({ url: '', functionName: '(garbage collector)' }, INDEX))).toBe('runtime:gc')
+    expect(ownerKey(classifyFrame({ url: '', functionName: 'fstat' }, INDEX))).toBe('runtime:native')
+    // The residual bucket stays the plain key so the group still has a catch-all.
+    expect(ownerKey(classifyFrame({ url: '(anonymous)', functionName: '(anonymous)' }, INDEX))).toBe('runtime')
   })
 
   test('an idle stack resolves to idle even though its root is runtime', () => {
@@ -126,6 +142,13 @@ describe('frame classification', () => {
     for (const url of ['node:fs', 'node:internal/fs/utils', 'native', '(root)', '(program)']) {
       expect(classifyFrameUrl(url, INDEX).kind).toBe('runtime')
     }
+  })
+
+  test('separates node internals, native and the program root', () => {
+    expect(classifyFrameUrl('node:fs', INDEX)).toEqual({ kind: 'runtime', name: 'node' })
+    expect(classifyFrameUrl('internal/fs/utils', INDEX)).toEqual({ kind: 'runtime', name: 'node' })
+    expect(classifyFrameUrl('native', INDEX)).toEqual({ kind: 'runtime', name: 'native' })
+    expect(classifyFrameUrl('(root)', INDEX)).toEqual({ kind: 'runtime', name: 'event-loop' })
   })
 
   test('picks the most specific prefix when rules nest', () => {

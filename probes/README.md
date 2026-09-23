@@ -16,6 +16,7 @@ node 03-overhead.mjs
 node 04-ancestor-walk.mjs
 node 05-io-counters.mjs
 node 06-async-hooks-fs.mjs
+node 07-runtime-composition.mjs
 ```
 
 ## 清单
@@ -28,6 +29,7 @@ node 06-async-hooks-fs.mjs
 | `04-ancestor-walk.mjs` | **决定性**：归因必须做祖先栈回溯，按文件归属会失效 | [证据 5](../docs/evidence.md#证据-5决定性归因必须做祖先栈回溯) |
 | `05-io-counters.mjs` | 进程级磁盘 I/O 操作次数可零依赖获取（Windows 实测精确） | [证据 6](../docs/evidence.md#证据-6进程级磁盘-io-操作次数精确零依赖) |
 | `06-async-hooks-fs.mjs` | `async_hooks` + `AsyncLocalStorage` 零补丁按插件统计文件操作 | [证据 7](../docs/evidence.md#证据-7按插件的文件操作次数精确零补丁) |
+| `07-runtime-composition.mjs` | `runtime` 桶由 GC / node 内部 / 原生帧 / 事件循环组成，必须细分 | [证据 9](../docs/evidence.md#证据-9runtime-桶的构成必须细分) |
 
 ## 注意事项
 

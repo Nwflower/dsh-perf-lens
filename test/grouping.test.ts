@@ -20,6 +20,8 @@ describe('groupIdOf', () => {
     expect(groupIdOf('harness')).toBe('harness')
     expect(groupIdOf('harness:@deepseek-ai/dsh-client-hmr')).toBe('harness')
     expect(groupIdOf('runtime')).toBe('runtime')
+    expect(groupIdOf('runtime:gc')).toBe('runtime')
+    expect(groupIdOf('runtime:node')).toBe('runtime')
     expect(groupIdOf('self')).toBe('self')
     expect(groupIdOf('unattributed')).toBe('other')
   })
