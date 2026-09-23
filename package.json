@@ -78,6 +78,14 @@
   ],
   "license": "MIT",
   "author": "Nwflower",
+  "homepage": "https://github.com/Nwflower/dsh-perf-lens",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nwflower/dsh-perf-lens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Nwflower/dsh-perf-lens/issues"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
     "@testing-library/dom": "^10.4.2",
