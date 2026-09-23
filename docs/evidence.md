@@ -405,3 +405,39 @@ foreach ($i in 1..3) {
 
 The first call after a host restart pays the one-time parse; later calls should stay in single-digit
 milliseconds until the log grows by more than a few windows.
+
+---
+
+## Evidence 13: CPU time must be charged at the achieved sample interval
+
+Every absolute CPU figure (`cpuSelfMs`, ms/s, % of one core, cumulative core-time) is a sample count
+times the milliseconds one sample stands for. The lens used the **configured** interval (250µs), but
+on Windows the profiler tick floors at about 540µs whatever is requested
+([design-overnight-analyzer.md §13.3](design-overnight-analyzer.md), probe 16). Read from the live
+host's `/api-perf/snapshot` (2026-09-23, one duty window):
+
+```
+before (charged at the configured 0.25ms)
+mode duty window 5000 samples 8969 active 101 achieved ms/sample 0.557 processCpuMs 454
+harness samples 83 cpuSelfMs 20.75 => ms/sample 0.250 | at achieved rate 46.3
+self samples 10 cpuSelfMs 2.5 => ms/sample 0.250 | at achieved rate 5.6
+runtime:native samples 4 cpuSelfMs 1 => ms/sample 0.250 | at achieved rate 2.2
+sum cpuSelfMs over rows 25.3 vs active*achieved 56.3
+
+after (charged at the profile span / sample count, global.sampleIntervalMs)
+mode duty window 5000 samples 9124 active 7459 sampleIntervalMs 0.567 (window/samples 0.548) processCpuMs 6204
+harness samples 5487 cpuSelfMs 3108.87 => ms/sample 0.567
+self samples 474 cpuSelfMs 268.56 => ms/sample 0.567
+dsh-cost-meter samples 422 cpuSelfMs 239.10 => ms/sample 0.567
+sum cpuSelfMs over rows 4226.2 vs active*interval 4226.2
+```
+
+Before the fix every absolute figure was about **2.2× too low** on this machine (and about 4.6× in
+the background profile, which samples at 1000µs+ but was also charged at 0.25ms). Shares were
+unaffected: they are ratios of sample counts. The interval now comes from the profile itself (V8's
+`endTime - startTime` over the sample count, falling back to the window length), is published as
+`global.sampleIntervalMs`, and is used for rows, the harness breakdown and hot functions alike.
+
+Reproduce: divide any row's `cpuSelfMs` by its sample count
+(`cpuShare × (sampleCount − idleSamples)`); it should equal `global.sampleIntervalMs`, and the rows
+should sum to `(sampleCount − idleSamples) × sampleIntervalMs`.

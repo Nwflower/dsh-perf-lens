@@ -20,7 +20,7 @@ function snapshot(at: number, windowMs: number, plugins: PluginMetricRow[]): Per
     global: {
       rss: 0, heapUsed: 0, heapTotal: 0, external: 0, arrayBuffers: 0,
       eventLoopLagP99Ms: 0, gcPauseMs: 0, fsOpsTotal: 0,
-      sampleWindowMs: windowMs, sampleCount: 10, idleSamples: 0,
+      sampleWindowMs: windowMs, sampleCount: 10, idleSamples: 0, sampleIntervalMs: 0.5,
     },
     plugins, unattributedShare: 0, selfShare: 0,
   }

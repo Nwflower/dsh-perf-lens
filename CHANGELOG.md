@@ -36,6 +36,8 @@ First release.
 - Runtime cost is split into GC, native / syscalls, Node internals and the event loop.
 - Every share is shown next to its absolute cost (ms/s and % of one core), because on an idle host a
   share's denominator is tiny.
+- CPU time is charged at the sample interval the profiler actually achieved in each window, not the
+  configured one (on Windows the tick floors at ~0.54ms however low it is set).
 - Per-plugin file operation counts come from `async_hooks`, with no patching of `node:fs`.
 - Deep mode re-attributes work a plugin schedules through harness callbacks, using async execution
   windows.

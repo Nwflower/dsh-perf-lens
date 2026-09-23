@@ -6,7 +6,7 @@ import type { PerfSnapshot } from '../src/shared/contract'
 
 const SNAPSHOT: PerfSnapshot = {
   windowStartedAt: 1, mode: 'duty',
-  global: { rss: 1, heapUsed: 2, heapTotal: 3, external: 4, arrayBuffers: 5, eventLoopLagP99Ms: 6, gcPauseMs: 7, fsOpsTotal: 8, sampleWindowMs: 5000, sampleCount: 9, idleSamples: 0 },
+  global: { rss: 1, heapUsed: 2, heapTotal: 3, external: 4, arrayBuffers: 5, eventLoopLagP99Ms: 6, gcPauseMs: 7, fsOpsTotal: 8, sampleWindowMs: 5000, sampleCount: 9, idleSamples: 0, sampleIntervalMs: 0.5 },
   plugins: [], unattributedShare: 0, selfShare: 0,
 }
 

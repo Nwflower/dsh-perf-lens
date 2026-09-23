@@ -111,7 +111,27 @@ function zeroGlobal(): GlobalMetricRow {
   return {
     rss: 0, heapUsed: 0, heapTotal: 0, external: 0, arrayBuffers: 0,
     eventLoopLagP99Ms: 0, gcPauseMs: 0, fsOpsTotal: 0, sampleWindowMs: 0, sampleCount: 0, idleSamples: 0,
+    sampleIntervalMs: 0,
   }
+}
+
+/**
+ * Milliseconds of CPU one sample stands for in this window.
+ *
+ * The configured interval is a request, not a promise: on Windows the profiler
+ * tick floors at ~0.54ms whatever is asked for (probe 16), so charging each
+ * sample at the configured 0.25ms understated every absolute cost about 2.2x
+ * (evidence 13). The profile's own span divided by its sample count is the
+ * interval actually achieved. Without V8 timing the window length stands in
+ * for the span; with no samples there is nothing to charge, and the configured
+ * interval is returned only so the figure is never 0 or NaN.
+ */
+export function sampleIntervalMs(cpu: CpuProfileResult | null, windowMs: number, configuredUs: number): number {
+  const count = cpu?.samples.length ?? 0
+  if (cpu === null || count === 0) return configuredUs / 1000
+  const spanUs = cpu.startTime !== undefined && cpu.endTime !== undefined ? cpu.endTime - cpu.startTime : 0
+  const spanMs = spanUs > 0 ? spanUs / 1000 : windowMs
+  return spanMs / count
 }
 
 /** Sum heap-sampling selfSize by owner, walking the tree once. */
@@ -449,36 +469,37 @@ export class Lens {
     const io = this.#deps.io.take()
     const ioPerOwner = collapseIoCounts(io.perOwner)
     const sampleCount = samples.length
+    const intervalMs = sampleIntervalMs(cpu, windowMs, this.#cpuIntervalUs())
     const idleSamples = cpuCounts.get('idle') ?? 0
     // Shares are over active samples: idle wall time is not cost, and including
     // it made every plugin look like ~0% on an idle host.
     const activeSamples = Math.max(0, sampleCount - idleSamples)
-    const global = { ...this.#deps.metrics.read(windowMs, sampleCount), idleSamples }
+    const global = { ...this.#deps.metrics.read(windowMs, sampleCount), idleSamples, sampleIntervalMs: intervalMs }
     this.#lastIdleShare = sampleCount === 0 ? 0 : idleSamples / sampleCount
     const rows: PluginMetricRow[] = []
     const seen = new Set<string>()
     for (const fact of this.#deps.plugins()) {
       const key = `plugin:${fact.moduleName}`
       seen.add(key)
-      rows.push(this.#row(key, fact.moduleName, fact.entryId, fact.fiberPhase, cpuCounts, heapCounts, ioPerOwner, activeSamples))
+      rows.push(this.#row(key, fact.moduleName, fact.entryId, fact.fiberPhase, cpuCounts, heapCounts, ioPerOwner, activeSamples, intervalMs))
     }
     for (const key of cpuCounts.keys()) {
       if (key === 'idle' || key.startsWith('plugin:') || seen.has(key)) continue
       seen.add(key)
-      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples))
+      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples, intervalMs))
     }
     // Owners with file activity but no CPU samples still deserve a row.
     for (const key of ioPerOwner.keys()) {
       if (key.startsWith('plugin:') || seen.has(key)) continue
       seen.add(key)
-      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples))
+      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples, intervalMs))
     }
     this.#lastOwnerKeys = [...rawCpuCounts.keys()]
     // Hot functions are a deep-mode extra and frame-level data: they go to the
     // in-memory store only, never into the snapshot that history persists.
     if (this.#deep && cpu !== null) {
       this.#deps.hotspots?.replace(
-        aggregateHotspots(cpu.samples, cpu.nodes, index, this.#options.cpuIntervalUs / 1000, undefined, asyncCorrelation.override),
+        aggregateHotspots(cpu.samples, cpu.nodes, index, intervalMs, undefined, asyncCorrelation.override),
       )
     } else {
       this.#deps.hotspots?.clear()
@@ -491,7 +512,7 @@ export class Lens {
       plugins: rows,
       unattributedShare: (cpuCounts.get('unattributed') ?? 0) / denominator,
       selfShare: (cpuCounts.get('self') ?? 0) / denominator,
-      harnessBreakdown: this.#harnessBreakdown(rawCpuCounts, rawHeapCounts, ioPerOwner, activeSamples),
+      harnessBreakdown: this.#harnessBreakdown(rawCpuCounts, rawHeapCounts, ioPerOwner, activeSamples, intervalMs),
     }
   }
 
@@ -532,6 +553,7 @@ export class Lens {
     heapCounts: ReadonlyMap<string, number>,
     ioPerOwner: ReadonlyMap<string, { readonly read: number; readonly write: number }>,
     activeSamples: number,
+    intervalMs: number,
   ): HarnessBreakdownRow[] {
     const keys = new Set<string>()
     for (const key of cpuCounts.keys()) if (key.startsWith('harness:')) keys.add(key)
@@ -544,7 +566,7 @@ export class Lens {
       rows.push({
         moduleName: key,
         cpuShare: activeSamples === 0 ? 0 : cpuSamples / activeSamples,
-        cpuSelfMs: cpuSamples * (this.#options.cpuIntervalUs / 1000),
+        cpuSelfMs: cpuSamples * intervalMs,
         liveHeapBytes: heapCounts.get(key) ?? 0,
         fsReadOps: io?.read ?? 0,
         fsWriteOps: io?.write ?? 0,
@@ -563,6 +585,7 @@ export class Lens {
     heapCounts: ReadonlyMap<string, number>,
     ioPerOwner: ReadonlyMap<string, { readonly read: number; readonly write: number }>,
     activeSamples: number,
+    intervalMs: number,
   ): PluginMetricRow {
     const cpuSamples = cpuCounts.get(key) ?? 0
     const ioCounts = ioPerOwner.get(key)
@@ -571,7 +594,7 @@ export class Lens {
       entryId,
       fiberPhase,
       cpuShare: activeSamples === 0 ? 0 : cpuSamples / activeSamples,
-      cpuSelfMs: cpuSamples * (this.#options.cpuIntervalUs / 1000),
+      cpuSelfMs: cpuSamples * intervalMs,
       liveHeapBytes: heapCounts.get(key) ?? 0,
       allocBytesPerSec: 0,
       fsReadOps: ioCounts?.read ?? 0,

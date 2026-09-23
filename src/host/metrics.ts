@@ -100,9 +100,10 @@ export class GlobalMetrics {
       fsOpsTotal,
       sampleWindowMs,
       sampleCount,
-      // The metrics collector cannot see the profile; the lens overwrites this
-      // with the idle sample count it derived from the CPU profile.
+      // The metrics collector cannot see the profile; the lens overwrites these
+      // with the idle count and sample interval it derives from the CPU profile.
       idleSamples: 0,
+      sampleIntervalMs: 0,
     }
   }
 }

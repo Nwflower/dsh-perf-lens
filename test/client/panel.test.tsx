@@ -13,7 +13,7 @@ const SNAPSHOT: PerfSnapshot = {
   mode: 'duty',
   global: {
     rss: 1024 * 1024, heapUsed: 512 * 1024, heapTotal: 1024 * 1024, external: 0, arrayBuffers: 0,
-    eventLoopLagP99Ms: 3, gcPauseMs: 1, fsOpsTotal: 5, sampleWindowMs: 5000, sampleCount: 100, idleSamples: 0,
+    eventLoopLagP99Ms: 3, gcPauseMs: 1, fsOpsTotal: 5, sampleWindowMs: 5000, sampleCount: 100, idleSamples: 0, sampleIntervalMs: 0.5,
   },
   plugins: [{
     moduleName: 'pluginA', entryId: 'a', fiberPhase: 'active',

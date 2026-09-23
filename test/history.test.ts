@@ -23,7 +23,7 @@ function snapshot(at: number): PerfSnapshot {
     mode: 'duty',
     global: {
       rss: 1, heapUsed: 2, heapTotal: 3, external: 4, arrayBuffers: 5,
-      eventLoopLagP99Ms: 6, gcPauseMs: 7, fsOpsTotal: 8, sampleWindowMs: 5000, sampleCount: 9, idleSamples: 0,
+      eventLoopLagP99Ms: 6, gcPauseMs: 7, fsOpsTotal: 8, sampleWindowMs: 5000, sampleCount: 9, idleSamples: 0, sampleIntervalMs: 0.5,
     },
     plugins: [],
     unattributedShare: 0,

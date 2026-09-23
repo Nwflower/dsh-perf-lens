@@ -4,7 +4,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { createOwnerIndex, type ProfileNode } from '../src/host/attribute'
 import { HotspotStore } from '../src/host/hotspots'
-import { collapseIoCounts, collapseOwnerCounts, continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, probesForActivity, type LensDeps } from '../src/host/lens'
+import { collapseIoCounts, collapseOwnerCounts, continuousExpired, DEFAULT_LENS_OPTIONS, Lens, nextIdleWait, probesForActivity, sampleIntervalMs, type LensDeps } from '../src/host/lens'
 import type { Sampler } from '../src/host/sampler'
 import type { PerfSnapshot } from '../src/shared/contract'
 
@@ -503,7 +503,8 @@ describe('harness breakdown (the ranking the fold hides)', () => {
 
   test('keeps the sub-package ranking beside the folded harness row', async () => {
     const h = makeHarness(HARNESS_INDEX)
-    h.sampler.stopCpu = vi.fn(async () => ({ nodes: HARNESS_NODES, samples: HARNESS_SAMPLES }))
+    // 100 samples over a 50ms profile span: 0.5ms of CPU per sample.
+    h.sampler.stopCpu = vi.fn(async () => ({ nodes: HARNESS_NODES, samples: HARNESS_SAMPLES, startTime: 0, endTime: 50_000 }))
     const snapshot = await new Lens(h.deps).runWindow()
     // The board still sees ONE folded harness row (60 of 100 active samples).
     const folded = snapshot.plugins.find(row => row.moduleName === 'harness')
@@ -517,7 +518,7 @@ describe('harness breakdown (the ranking the fold hides)', () => {
       'harness:@deepseek-ai/dsh',
     ])
     const top = snapshot.harnessBreakdown?.[0]
-    expect(top?.cpuSelfMs).toBeCloseTo(30 * (DEFAULT_LENS_OPTIONS.cpuIntervalUs / 1000), 5)
+    expect(top?.cpuSelfMs).toBeCloseTo(30 * 0.5, 5)
     expect(top?.cpuShare).toBeCloseTo(0.3, 5)
   })
 
@@ -525,5 +526,33 @@ describe('harness breakdown (the ranking the fold hides)', () => {
     const h = makeHarness()
     const snapshot = await new Lens(h.deps).runWindow()
     expect(snapshot.harnessBreakdown).toEqual([])
+  })
+})
+
+describe('sampleIntervalMs (what one sample is worth)', () => {
+  test('divides the profile span by the sample count', () => {
+    // Windows: 250us requested, ~540us achieved (probe 16).
+    const cpu = { nodes: [], samples: Array<number>(1000).fill(1), startTime: 10_000, endTime: 550_000 }
+    expect(sampleIntervalMs(cpu, 5000, 250)).toBeCloseTo(0.54, 5)
+  })
+
+  test('falls back to the window length when the profile has no timing', () => {
+    expect(sampleIntervalMs({ nodes: [], samples: Array<number>(100).fill(1) }, 5000, 250)).toBe(50)
+  })
+
+  test('returns the configured interval when there is nothing to charge', () => {
+    expect(sampleIntervalMs(null, 5000, 250)).toBe(0.25)
+    expect(sampleIntervalMs({ nodes: [], samples: [] }, 5000, 250)).toBe(0.25)
+  })
+
+  test('the lens charges rows at the achieved interval, not the configured one', async () => {
+    const h = makeHarness()
+    // 260 samples over 140.4ms: 0.54ms each, while 0.25ms is configured.
+    h.sampler.stopCpu = vi.fn(async () => ({ nodes: NODES, samples: SAMPLES, startTime: 0, endTime: 140_400 }))
+    const snapshot = await new Lens(h.deps).runWindow()
+    expect(DEFAULT_LENS_OPTIONS.cpuIntervalUs).toBe(250)
+    expect(snapshot.global.sampleIntervalMs).toBeCloseTo(0.54, 5)
+    expect(snapshot.plugins.find(row => row.moduleName === 'pluginA')?.cpuSelfMs).toBeCloseTo(200 * 0.54, 5)
+    expect(snapshot.plugins.find(row => row.moduleName === 'pluginB')?.cpuSelfMs).toBeCloseTo(60 * 0.54, 5)
   })
 })

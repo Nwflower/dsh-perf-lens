@@ -32,10 +32,10 @@ export function GlobalBar({ snapshot }: GlobalBarProps) {
   // share columns be read as absolute cost (docs/design-overnight-analyzer.md §6.5).
   const idleBasis = idleShare >= DEFAULTS.idleBackoffThreshold
   // Resolution: the profiler's achieved interval, not the configured one. On
-  // Windows the tick floors at ~536us regardless of a 250us setting (probe 16),
-  // so the honest floor is sampleWindowMs / sampleCount. One active sample is
+  // Windows the tick floors at ~536us regardless of a 250us setting (probe 16).
+  // The host charges every sample at this interval, so one active sample is
   // worth that much CPU, and 1/activeSamples of share.
-  const achievedIntervalMs = global.sampleCount > 0 ? global.sampleWindowMs / global.sampleCount : 0
+  const achievedIntervalMs = global.sampleCount > 0 ? global.sampleIntervalMs : 0
   const shareGranularity = activeSamples > 0 ? 1 / activeSamples : 0
   // Coverage needs a process-CPU figure well above the platform clock's
   // granularity (probe 08: ~15.6ms on Windows); below the floor the ratio is

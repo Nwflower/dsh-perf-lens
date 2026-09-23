@@ -89,7 +89,7 @@ describe('HotspotStore', () => {
       global: {
         rss: 0, heapUsed: 0, heapTotal: 0, external: 0, arrayBuffers: 0,
         eventLoopLagP99Ms: 0, gcPauseMs: 0, fsOpsTotal: 0,
-        sampleWindowMs: 5000, sampleCount: 1, idleSamples: 0,
+        sampleWindowMs: 5000, sampleCount: 1, idleSamples: 0, sampleIntervalMs: 0.5,
       },
       plugins: [], unattributedShare: 0, selfShare: 0,
     }

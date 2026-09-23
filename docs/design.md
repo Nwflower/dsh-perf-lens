@@ -288,7 +288,7 @@ Single source of truth for the types: `src/shared/contract.ts`. One row per plug
 | Field | Unit | Precision | Source |
 | --- | --- | --- | --- |
 | cpuShare | % | sampled estimate | CPU profiler |
-| cpuSelfMs | ms | sampled estimate | CPU profiler |
+| cpuSelfMs | ms | sampled estimate | CPU profiler: samples × the window's achieved interval (`sampleIntervalMs`) |
 | liveHeapBytes | B | sampled estimate | heap sampling (`stopSampling`) |
 | allocBytesPerSec | B/s | sampled estimate | heap sampling tree deltas |
 | fsReadOps / fsWriteOps | count | **exact** | async_hooks |
@@ -300,7 +300,7 @@ Single source of truth for the types: `src/shared/contract.ts`. One row per plug
 
 Plus one process row: rss / heapUsed / heapTotal / external / arrayBuffers / eventLoopLagP99Ms /
 gcPauseMs / fsOpsTotal (exact, process-wide) / sampleWindowMs / sampleCount / idleSamples /
-processCpuMs.
+sampleIntervalMs / processCpuMs.
 
 **Idle must be kept apart from runtime.** The CPU profiler samples idle time as nodes with an empty
 URL and the function name `(idle)` (measured: 1715 of 1716 samples in an idle 3s window). Counting
@@ -347,7 +347,9 @@ every share ([design-overnight-analyzer.md §6.5](design-overnight-analyzer.md))
   is turned on. 250µs was chosen by measurement: on an idle 3s window it costs the same as 1000µs
   (15 vs 16ms of CPU) with four times the resolution, while 100µs jumps to 126ms (8×). The cliff is
   between 250µs and 100µs. (On Windows the achieved interval floors at about 540µs regardless;
-  see design-overnight-analyzer.md §13.3.)
+  see design-overnight-analyzer.md §13.3.) CPU time is therefore always charged at the interval the
+  profile actually achieved — its span over its sample count — never the configured one
+  (evidence 13).
 - **Idle backoff:** when a window is at least 80% idle, the duty-cycle sleep stretches by 4× (up to
   120s). On an idle host nearly every sample is idle, and keeping the cadence only burns CPU and
   disk. (Basis: evidence 8's only stable trend is "both samplers together cost the most", so by
@@ -559,3 +561,4 @@ leaves child processes out.**
 | 18 | Splitting runtime | `runtime` is no longer one row: `runtime:gc` / `runtime:native` / `runtime:node` / `runtime:event-loop`, with the remainder left in `runtime`. Basis: [evidence 9](evidence.md#evidence-9-the-runtime-bucket-must-be-split) — the bucket measured 19% GC, 14% Node internals and a tail of native frames |
 | 19 | History read path | `/stats` and `/trend` read through an incremental in-memory cache (`HistoryStore.summaries`) instead of re-parsing the log per call; the panel refetches only after a new window is recorded ([evidence 12](evidence.md#evidence-12-re-parsing-history-on-every-panel-refresh)) |
 | 20 | Ranking length and estimate | The ranking lists only plugins with sampled CPU, top 10 by default with "show all". The whole-range estimate is hidden below 5% sampling coverage (`estimateMinCoverage`), where it would be a 20× or larger scale-up |
+| 21 | What one sample is worth | Each window charges its samples at the **achieved** interval (profile span / sample count, published as `global.sampleIntervalMs`), not the configured one. Charging at the configured 250µs understated every absolute figure about 2.2× on Windows ([evidence 13](evidence.md#evidence-13-cpu-time-must-be-charged-at-the-achieved-sample-interval)) |

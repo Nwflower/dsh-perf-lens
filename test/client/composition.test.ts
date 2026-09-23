@@ -20,7 +20,7 @@ function snapshot(plugins: PluginMetricRow[], over: Partial<PerfSnapshot> = {}):
     global: {
       rss: 1024 * 1024, heapUsed: 1000, heapTotal: 2048, external: 0, arrayBuffers: 0,
       eventLoopLagP99Ms: 1, gcPauseMs: 1, fsOpsTotal: 0, sampleWindowMs: 5000,
-      sampleCount: 100, idleSamples: 0,
+      sampleCount: 100, idleSamples: 0, sampleIntervalMs: 0.5,
     },
     plugins,
     unattributedShare: 0,

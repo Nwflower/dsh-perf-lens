@@ -84,6 +84,13 @@ export interface GlobalMetricRow {
   /** Total CPU-profile samples in the window, including idle. */
   readonly sampleCount: number
   /**
+   * Milliseconds of CPU one sample stands for in this window: the interval the
+   * profiler actually achieved, which can be far above the configured one
+   * (Windows floors it at ~0.54ms; docs/evidence.md, evidence 13). Every
+   * cpuSelfMs in the window is its sample count times this.
+   */
+  readonly sampleIntervalMs: number
+  /**
    * Samples taken while the thread was idle. Per-plugin cpuShare is computed
    * over `sampleCount - idleSamples` so an idle host does not dilute every
    * plugin's share toward zero.

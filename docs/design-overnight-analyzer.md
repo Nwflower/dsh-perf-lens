@@ -705,8 +705,10 @@ about 536µs. So:
    500µs;
 2. to be cheaper than 500µs you have to drop to 1000µs, halving resolution (cost ∝ actual sample
    count);
-3. the resolution the panel shows must be the **achieved** value (`sampleWindowMs / sampleCount`),
-   never the configured one taken as a promise — already implemented;
+3. the resolution the panel shows must be the **achieved** value, never the configured one taken as
+   a promise — and CPU time must be charged at it too. Both are implemented: each window publishes
+   `global.sampleIntervalMs` (profile span / sample count) and every `cpuSelfMs` is samples × that
+   (evidence 13);
 4. the floor is platform-specific (usually lower on Linux); re-run probe 16 on a new platform.
 
 ### 13.4 Process-level calibration: "truly idle" versus "missed"
