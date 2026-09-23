@@ -82,7 +82,6 @@ src/
     scoreboard.tsx         // cumulative-cost ranking (avg / p95 / peak / estimate)
     metrics-table.tsx      // grouped, sortable per-plugin table with folds
     control-bar.tsx        // pause / continuous / background / deep controls
-    coverage-badge.tsx     // partial-metric marker
     sparkline.tsx          // inline SVG sparkline
     vitals.ts              // long-task + rAF foreground reporter
     error-boundary.tsx     // keeps a render error from blanking the host page
@@ -316,6 +315,9 @@ every share ([design-overnight-analyzer.md §6.5](design-overnight-analyzer.md))
 
 ### Coverage rules (a hard product constraint)
 
+These govern the partially covered byte metrics. None is measured yet, so the panel shows no byte
+figures and no coverage column (decision #22); the rules apply the day one is added.
+
 - Every inexact metric must carry a **visual marker** in the UI; it may not sit next to exact figures
   looking equally trustworthy.
 - Below the coverage threshold (default **60%**) a byte column shows "≥ N (insufficient coverage)"
@@ -435,7 +437,7 @@ schema.
 | idleBackoffThreshold | 0.8 | Idle share that triggers backoff |
 | idleBackoffFactor | 4 | Sleep multiplier during backoff |
 | idleBackoffMaxMs | 120000 | Longest backoff sleep |
-| coverageWarnThreshold | 0.6 | Coverage warning threshold |
+| coverageWarnThreshold | 0.6 | Coverage warning threshold (once byte metrics exist) |
 | unattributedWarnThreshold | 0.15 | Unattributed-share warning threshold |
 | estimateMinCoverage | 0.05 | Below this range coverage the ranking hides its whole-range estimate |
 
@@ -486,8 +488,8 @@ controls; clicking it opens the main panel through `ctx.layout.selectPanel(PANEL
 ### Interaction rules
 
 - Sorted by `cpuShare` descending by default; memory, disk and allocation rate are also sortable.
-- The coverage column marks anything under the threshold with a warning style and explains it on
-  hover.
+- No coverage column until a partially covered metric is shown (decision #22); file operation
+  counts are exact and need none.
 - The header chip names the active sampling mode (continuous mode is highlighted).
 - A full analysis page under `settings.section`: Phase 2.
 
@@ -562,3 +564,4 @@ leaves child processes out.**
 | 19 | History read path | `/stats` and `/trend` read through an incremental in-memory cache (`HistoryStore.summaries`) instead of re-parsing the log per call; the panel refetches only after a new window is recorded ([evidence 12](evidence.md#evidence-12-re-parsing-history-on-every-panel-refresh)) |
 | 20 | Ranking length and estimate | The ranking lists only plugins with sampled CPU, top 10 by default with "show all". The whole-range estimate is hidden below 5% sampling coverage (`estimateMinCoverage`), where it would be a 20× or larger scale-up |
 | 21 | What one sample is worth | Each window charges its samples at the **achieved** interval (profile span / sample count, published as `global.sampleIntervalMs`), not the configured one. Charging at the configured 250µs understated every absolute figure about 2.2× on Windows ([evidence 13](evidence.md#evidence-13-cpu-time-must-be-charged-at-the-achieved-sample-interval)) |
+| 22 | Per-plugin bytes and the coverage column | **Not built for 0.1.0; the column is removed.** The only patch-free route to per-plugin bytes is wrapping the harness `ctx.fs` service, and only harness packages call it (the model file tools, workspace files, ssh, deliverables) — none of the 13 third-party plugins installed on the reference host does. The wrapper would mean intercepting a core service across every fs backend and resolving the calling plugin, and still show 0% coverage for every external plugin. The table shows exact operation counts instead, which need no coverage marker |

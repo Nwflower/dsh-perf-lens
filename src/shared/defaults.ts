@@ -40,7 +40,6 @@ export const DEFAULTS = {
    * expensive option (async_hooks before/after plus a stack per async init).
    */
   asyncAttribution: true,
-  coverageWarnThreshold: 0.6,
   /**
    * Below this range coverage the scoreboard hides its whole-range estimate.
    * At 5% the estimate is already a 20x scale-up of the sampled windows; a

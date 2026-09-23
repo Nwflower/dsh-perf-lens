@@ -210,8 +210,3 @@
   position: sticky; top: 0; z-index: 1;
   background: var(--dsw-alias-bg-layer-1, #fff);
 }
-
-/* ---- coverage badge ---- */
-
-.pl-cov { white-space: nowrap; opacity: 0.7; }
-.pl-cov-low { opacity: 1; color: var(--dsw-alias-state-warn-label, #b8821c); }

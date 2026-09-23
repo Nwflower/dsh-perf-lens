@@ -63,7 +63,8 @@ describe('translate', () => {
     expect(t('moreLines', { n: 4 })).toBe('另有 4 条曲线未在图例标注')
     setActiveLocale('en')
     expect(t('moreLines', { n: 4 })).toBe('4 more series not labelled in the legend')
-    expect(t('coverageLowTitle', { percent: 12, threshold: 60 })).toBe('Low coverage: 12% only (threshold 60%)')
+    expect(t('estimateHidden', { coverage: '1.50%', factor: 67 }))
+      .toBe('Sampling covered only 1.50% of this range; a whole-range estimate would be a 67x extrapolation, so it is hidden')
   })
 
   test('a missing parameter stays visible instead of blanking the line', () => {
@@ -121,7 +122,7 @@ describe('copy review (plain language over profiler jargon)', () => {
     // matching *Hint key, in both dictionaries.
     const explained = [
       'rss', 'heap', 'lag', 'gc', 'window', 'activeSamples', 'idleShare',
-      'coreShare', 'absolute', 'coverage', 'p95', 'longTasks', 'rafGap',
+      'coreShare', 'absolute', 'estimate', 'p95', 'longTasks', 'rafGap',
       'unattributed', 'self', 'harness', 'deep', 'continuous', 'duty', 'liveHeap',
     ]
     for (const key of explained) {

@@ -336,7 +336,6 @@ export function PerfPanel({ api }: PerfPanelProps) {
         <MetricsTable
           rows={snapshot.plugins}
           series={series}
-          coverageThreshold={DEFAULTS.coverageWarnThreshold}
           sampleWindowMs={snapshot.global.sampleWindowMs}
           harnessBreakdown={snapshot.harnessBreakdown ?? []}
           expanded={expanded}

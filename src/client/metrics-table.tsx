@@ -15,7 +15,6 @@
 import { Fragment, useState } from 'react'
 import type { HarnessBreakdownRow, Hotspot, PerfStats, PluginMetricRow } from '../shared/contract'
 import { groupRows, groupShareOf, type PluginGroupId } from '../shared/grouping'
-import { CoverageBadge } from './coverage-badge'
 import { formatBytes, formatMsPerSecond, formatOps, formatPercent } from './format'
 import { displayHarnessPackage, displayOwner, t } from './i18n'
 import { Sparkline } from './sparkline'
@@ -39,10 +38,16 @@ const GROUP_LABEL: Record<PluginGroupId, 'groupExternal' | 'groupHarness' | 'gro
   other: 'groupOther',
 }
 
+/**
+ * Columns per row. There is no coverage column: coverage qualifies byte
+ * counts, and the table shows only file operation counts, which are exact.
+ * Per-plugin bytes are not measured (docs/design.md §13 #22).
+ */
+const COLUMNS = 9
+
 export interface MetricsTableProps {
   readonly rows: readonly PluginMetricRow[]
   readonly series: Readonly<Record<string, readonly number[]>>
-  readonly coverageThreshold: number
   /** Window length the cpuSelfMs figures were measured over (absolute-cost basis). */
   readonly sampleWindowMs: number
   /** Harness sub-packages shown under the folded harness row (host-provided). */
@@ -85,7 +90,7 @@ export function breakdownToRow(row: HarnessBreakdownRow): PluginMetricRow {
 }
 
 export function MetricsTable({
-  rows, series, coverageThreshold, sampleWindowMs, harnessBreakdown, expanded, hotspots, onToggle, stats,
+  rows, series, sampleWindowMs, harnessBreakdown, expanded, hotspots, onToggle, stats,
 }: MetricsTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('cpuShare')
   const [openStatic, setOpenStatic] = useState<ReadonlySet<PluginGroupId>>(new Set())
@@ -157,11 +162,8 @@ export function MetricsTable({
           <td className="pl-td">{formatBytes(row.liveHeapBytes)}</td>
           <td className="pl-td">{formatOps(row.fsReadOps, row.fsWriteOps)}</td>
           <td className="pl-td">{sub || row.allocBytesPerSec === 0 ? '—' : formatBytes(row.allocBytesPerSec) + '/s'}</td>
-          <td className="pl-td">
-            {sub ? <span className="pl-td-dim">—</span> : <CoverageBadge coverage={row.coverage} threshold={coverageThreshold} />}
-          </td>
         </tr>
-        {isOpen ? detailRow(row.moduleName, 10) : null}
+        {isOpen ? detailRow(row.moduleName, COLUMNS) : null}
       </Fragment>
     )
   }
@@ -180,7 +182,6 @@ export function MetricsTable({
             <th className="pl-th pl-th-sort" title={t('liveHeapHint')} onClick={() => { setSortKey('liveHeapBytes') }}>{t('liveHeap')}{sortKey === 'liveHeapBytes' ? ' ▾' : ''}</th>
             {sortHeader('fs', t('disk'))}
             {sortHeader('allocBytesPerSec', t('alloc'))}
-            <th className="pl-th" title={t('coverageHint')}>{t('coverage')}</th>
           </tr>
         </thead>
         <tbody>
@@ -191,7 +192,7 @@ export function MetricsTable({
             return (
               <Fragment key={group.id}>
                 <tr className="pl-group-row">
-                  <th colSpan={10} className="pl-th">
+                  <th colSpan={COLUMNS} className="pl-th">
                     <span>{t(GROUP_LABEL[group.id])}</span>
                     <span className="pl-group-meta"> · {sorted.length}</span>
                     {sorted.length > 0 ? <span className="pl-group-meta"> · {formatPercent(groupShareOf(group))}</span> : null}
