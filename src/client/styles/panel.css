@@ -1,0 +1,217 @@
+/*
+ * Perf Lens panel design system. One sheet, flat pl-* class namespace (the
+ * anti-collision rule for a bundle that injects a raw <style> tag into the
+ * host page). Colors come from the harness theme's --dsw-alias-* semantic
+ * tokens with literal fallbacks, so the panel tracks light/dark and never
+ * invents its own theme. Chart series colors are data-visualization values
+ * (not theme colors) and live as local custom properties on .pl-root.
+ */
+
+.pl-root {
+  /* Local chart palette: mid-saturation hues readable on both themes. */
+  --pl-c1: #4f8cff;
+  --pl-c2: #ff8a4f;
+  --pl-c3: #41c98a;
+  --pl-c4: #c061ff;
+  --pl-c5: #e3b93c;
+  --pl-c6: #ff5d7a;
+  --pl-c7: #4fd8e0;
+  --pl-c8: #9aa0a6;
+  /* Aggregate/remainder stops on composition bars, quieter than any series. */
+  --pl-rest: color-mix(in srgb, var(--dsw-alias-label-secondary, #8a8f98) 45%, transparent);
+  --pl-unattr: color-mix(in srgb, var(--dsw-alias-label-secondary, #8a8f98) 28%, transparent);
+  --pl-free: color-mix(in srgb, var(--dsw-alias-label-secondary, #8a8f98) 12%, transparent);
+
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px 20px 32px;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ---- header: title, mode chip, sampling controls ---- */
+
+.pl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.pl-title { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.pl-mode {
+  flex: none; font-size: 11px; line-height: 18px; padding: 0 10px; border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2, #f2f3f5);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(31, 35, 41, 0.1));
+  color: var(--dsw-alias-label-secondary, #646a73);
+  white-space: nowrap;
+}
+.pl-mode-warn { color: var(--dsw-alias-state-warn-label, #b8821c); }
+.pl-controls { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pl-controls-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #646a73); }
+
+/* Segmented toggle group (the dsh shell's own control idiom). */
+.pl-seg {
+  display: flex; gap: 2px; padding: 1px; border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2, #f2f3f5);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(31, 35, 41, 0.1));
+}
+.pl-seg-btn {
+  border: 0; background: transparent; cursor: pointer; font-family: inherit;
+  color: var(--dsw-alias-label-secondary, #646a73);
+  font-size: 11px; line-height: 1; padding: 4px 10px; border-radius: 5px;
+  transition: color 0.15s ease-in-out;
+  white-space: nowrap;
+}
+.pl-seg-btn:hover { color: var(--dsw-alias-label-primary, #1f2329); }
+.pl-seg-btn:disabled { cursor: progress; opacity: 0.6; }
+.pl-seg-on, .pl-seg-on:hover {
+  background: var(--dsw-alias-button-primary-fill, #3370ff);
+  color: var(--dsw-alias-label-primary-foreground, #fff);
+}
+
+/* ---- cards ---- */
+
+.pl-card {
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(31, 35, 41, 0.1));
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.pl-card-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
+.pl-card-title-aside { margin-left: auto; display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.pl-note { font-size: 11px; color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-empty { color: var(--dsw-alias-label-secondary, #646a73); padding: 18px 0; text-align: center; }
+.pl-error { color: var(--dsw-alias-state-error-primary, #d83931); font-size: 12px; margin-top: 4px; }
+
+/* ---- overview KPI tiles ---- */
+
+.pl-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.pl-kpi {
+  background: var(--dsw-alias-bg-layer-2, #f2f3f5);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+.pl-kpi-label { font-size: 11px; color: var(--dsw-alias-label-secondary, #646a73); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pl-kpi-value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; }
+.pl-chips { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 11px; color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-chip-warn { color: var(--dsw-alias-state-warn-label, #b8821c); }
+
+/* ---- composition stacked bars ---- */
+
+.pl-comp { display: flex; gap: 18px; flex-wrap: wrap; }
+.pl-comp-col { flex: 1 1 280px; min-width: 0; }
+.pl-comp-label { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--dsw-alias-label-secondary, #646a73); margin-bottom: 6px; }
+.pl-comp-label strong { color: var(--dsw-alias-label-primary, #1f2329); font-weight: 600; }
+.pl-bar {
+  display: flex; height: 14px; border-radius: 7px; overflow: hidden;
+  background: var(--dsw-alias-bg-layer-2, #f2f3f5);
+}
+.pl-bar-seg { height: 100%; min-width: 0; }
+.pl-legend { display: grid; gap: 3px; margin-top: 8px; }
+.pl-legend-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; min-width: 0; }
+.pl-legend-dot { flex: none; width: 9px; height: 9px; border-radius: 2px; align-self: center; }
+.pl-legend-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-legend-val { flex: none; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-legend-val strong { color: var(--dsw-alias-label-primary, #1f2329); font-weight: 600; }
+
+/* ---- top-consumer plugin cards ---- */
+
+.pl-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.pl-pcard {
+  border: 1px solid var(--dsw-alias-border-l2, rgba(31, 35, 41, 0.1));
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.pl-pcard-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; min-width: 0; }
+.pl-pcard-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pl-pcard-cpu { flex: none; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pl-pcard-stat { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-pcard-stat span:last-child { font-variant-numeric: tabular-nums; }
+
+/* ---- trend chart ---- */
+
+.pl-chart-wrap { position: relative; }
+.pl-chart { width: 100%; height: auto; display: block; }
+.pl-chart-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; margin-top: 6px; }
+.pl-chart-legend-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.pl-chart-legend-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.pl-tip {
+  position: absolute; top: 4px; z-index: 3;
+  transform: translateX(-50%);
+  background: var(--dsw-alias-bg-layer-2, #f2f3f5);
+  border: 1px solid var(--dsw-alias-border-l1, rgba(31, 35, 41, 0.06));
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.pl-tip-time { font-weight: 600; margin-bottom: 2px; }
+.pl-tip-row { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+
+/* ---- vitals strip ---- */
+
+.pl-vitals { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; font-size: 12px; }
+.pl-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.pl-dot-ok { background: var(--dsw-alias-state-success-primary, #34a853); }
+.pl-dot-jank { background: var(--dsw-alias-state-warn-label, #b8821c); }
+.pl-dot-idle { background: var(--dsw-alias-label-secondary, #8a8f98); }
+.pl-vitals-dim { color: var(--dsw-alias-label-secondary, #646a73); }
+
+/* ---- tables (scoreboard + metrics) ---- */
+
+.pl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pl-th {
+  padding: 5px 8px; text-align: right; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary, #646a73); font-weight: 400;
+}
+.pl-th-left { text-align: left; }
+.pl-th-sort { cursor: pointer; user-select: none; }
+.pl-th-sort:hover { color: var(--dsw-alias-label-primary, #1f2329); }
+.pl-td { padding: 5px 8px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pl-td-left { text-align: left; }
+.pl-td-name { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.pl-td-click { cursor: pointer; }
+.pl-td-dim { color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-row:hover .pl-td { background: var(--dsw-alias-bg-layer-2, #f2f3f5); }
+/* Harness sub-package rows: indented under the folded harness row so the fold
+   stays the summary and the breakdown reads as its detail. */
+.pl-td-sub { padding-left: 24px; color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-row-sub .pl-td { font-size: 11.5px; }
+.pl-group-row .pl-td, .pl-group-row .pl-th {
+  text-align: left; font-weight: 600;
+  padding: 8px 8px 4px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(31, 35, 41, 0.06));
+  color: var(--dsw-alias-label-primary, #1f2329);
+}
+.pl-group-meta { font-weight: 400; color: var(--dsw-alias-label-secondary, #646a73); }
+.pl-fold-btn {
+  border: 0; background: transparent; cursor: pointer; font-family: inherit;
+  font-size: 11px; margin-left: 8px; padding: 1px 6px; border-radius: 4px;
+  color: var(--dsw-alias-label-secondary, #646a73);
+}
+.pl-fold-btn:hover { background: var(--dsw-alias-bg-layer-2, #f2f3f5); color: var(--dsw-alias-label-primary, #1f2329); }
+/* Footer under a capped table: the show-all toggle plus what was left out. */
+.pl-table-foot { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin-top: 6px; }
+.pl-table-foot .pl-fold-btn { margin-left: 0; }
+.pl-detail { padding: 4px 8px 10px 22px; }
+.pl-detail-row { display: flex; gap: 8px; font-size: 12px; }
+.pl-detail-fn { min-width: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pl-detail-url { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--dsw-alias-label-secondary, #646a73); }
+
+/* Nested scroll region for the long metrics table; the page itself scrolls
+   on .pl-root, so the table caps its own height and pins its header. */
+.pl-table-wrap { max-height: 52vh; overflow: auto; }
+.pl-table-wrap .pl-th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--dsw-alias-bg-layer-1, #fff);
+}
+
+/* ---- coverage badge ---- */
+
+.pl-cov { white-space: nowrap; opacity: 0.7; }
+.pl-cov-low { opacity: 1; color: var(--dsw-alias-state-warn-label, #b8821c); }

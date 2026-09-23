@@ -1,6 +1,8 @@
-// Sampling controls. Every toggle takes effect immediately on the host; the
-// continuous toggle is the only one that raises overhead, and it is bounded
-// host-side by continuousMaxMs.
+// Sampling controls as one segmented group. Every toggle takes effect
+// immediately on the host. Two of them raise cost: continuous sampling (bounded
+// host-side by continuousMaxMs) and deep sampling (adds heap sampling). Each
+// label names what it acts on ("sampling") and its hint says what a second
+// click does, because "continuous" alone does not say what continues.
 
 import type { SampleMode } from '../shared/contract'
 import { t } from './i18n'
@@ -17,47 +19,42 @@ export interface ControlBarProps {
 }
 
 export function ControlBar({ mode, deep, busy, onPause, onResume, onToggleContinuous, onToggleBackground, onToggleDeep }: ControlBarProps) {
-  const button: React.CSSProperties = {
-    padding: '3px 10px',
-    fontSize: '12px',
-    borderRadius: '6px',
-    border: '1px solid var(--dsw-color-border, rgba(127,127,127,0.35))',
-    background: 'transparent',
-    color: 'inherit',
-    cursor: busy ? 'progress' : 'pointer',
-  }
-  const active: React.CSSProperties = { ...button, borderColor: 'var(--dsw-color-accent, #4c8dff)', fontWeight: 600 }
+  const cls = (on: boolean): string => on ? 'pl-seg-btn pl-seg-on' : 'pl-seg-btn'
   return (
-    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '12px' }}>
-      <button
-        type="button"
-        style={mode === 'paused' ? active : button}
-        disabled={busy}
-        onClick={mode === 'paused' ? onResume : onPause}
-      >
-        {mode === 'paused' ? t('resume') : t('pause')}
-      </button>
-      <button
-        type="button"
-        style={mode === 'continuous' ? active : button}
-        disabled={busy}
-        onClick={onToggleContinuous}
-      >
-        {t('continuous')}
-      </button>
-      <button
-        type="button"
-        style={mode === 'background' ? active : button}
-        disabled={busy}
-        onClick={onToggleBackground}
-        title={t('backgroundHint')}
-      >
-        {t('background')}
-      </button>
-      <button type="button" style={deep ? active : button} disabled={busy} onClick={onToggleDeep}>
-        {t('deep')}
-      </button>
-      {deep ? <span style={{ opacity: 0.7 }}>{t('deepOn')}</span> : null}
-    </div>
+    <>
+      <div className="pl-seg" role="group" aria-label={t('modeLabel')}>
+        <button
+          type="button"
+          className={cls(mode === 'paused')}
+          disabled={busy}
+          onClick={mode === 'paused' ? onResume : onPause}
+          title={mode === 'paused' ? t('resumeHint') : t('pauseHint')}
+        >
+          {mode === 'paused' ? t('resume') : t('pause')}
+        </button>
+        <button
+          type="button"
+          className={cls(mode === 'continuous')}
+          disabled={busy}
+          onClick={onToggleContinuous}
+          title={t('continuousHint')}
+        >
+          {t('continuous')}
+        </button>
+        <button
+          type="button"
+          className={cls(mode === 'background')}
+          disabled={busy}
+          onClick={onToggleBackground}
+          title={t('backgroundHint')}
+        >
+          {t('background')}
+        </button>
+        <button type="button" className={cls(deep)} disabled={busy} onClick={onToggleDeep} title={t('deepHint')}>
+          {t('deep')}
+        </button>
+      </div>
+      {deep ? <span className="pl-controls-hint">{t('deepOn')}</span> : null}
+    </>
   )
 }

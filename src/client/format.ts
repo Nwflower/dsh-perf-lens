@@ -23,6 +23,33 @@ export function formatMs(ms: number): string {
   return ms >= 10 ? `${ms.toFixed(0)}ms` : `${ms.toFixed(1)}ms`
 }
 
+/**
+ * Absolute CPU cost: sampled CPU milliseconds per second of sampled wall time.
+ *
+ * This exists because `cpuShare` alone cannot be compared across hosts. Its
+ * denominator is the ACTIVE sample count, so on a 93%-idle host (the norm) it
+ * inflates every owner by ~15x: a package burning 1.3 ms/s shows as a 96% share
+ * (see docs/design-overnight-analyzer.md §6.5). Absolute ms/s is the figure an
+ * optimization decision can actually use, so the panel shows it next to share.
+ */
+export function cpuMsPerSecond(cpuMs: number, windowMs: number): number {
+  if (!Number.isFinite(cpuMs) || !Number.isFinite(windowMs) || windowMs <= 0) return 0
+  return cpuMs / (windowMs / 1000)
+}
+
+/** The same cost as a fraction of ONE core (0..1). */
+export function cpuCoreShare(cpuMs: number, windowMs: number): number {
+  if (!Number.isFinite(cpuMs) || !Number.isFinite(windowMs) || windowMs <= 0) return 0
+  return cpuMs / windowMs
+}
+
+export function formatMsPerSecond(cpuMs: number, windowMs: number): string {
+  const value = cpuMsPerSecond(cpuMs, windowMs)
+  if (value <= 0) return '—'
+  if (value >= 100) return `${value.toFixed(0)}ms/s`
+  return value >= 10 ? `${value.toFixed(1)}ms/s` : `${value.toFixed(2)}ms/s`
+}
+
 export function formatOps(reads: number, writes: number): string {
   if (reads === 0 && writes === 0) return '—'
   return `${reads} / ${writes}`

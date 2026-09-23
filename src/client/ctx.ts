@@ -27,10 +27,21 @@ export interface SlotsService {
   register(registration: SlotRegistration, component: unknown): unknown
 }
 
+/** Snapshot the locale service publishes; only `active` is consumed here. */
+export interface LocaleSnapshot {
+  readonly active: string
+  readonly revision: number
+}
+
 /** Client locale service. */
 export interface LocaleService {
+  /** Bilingual registration: both built-in dictionaries in one call. */
   register(ns: string, dicts: Record<string, Record<string, string>>): () => void
   bind(ns: string): (key: string, params?: Record<string, string | number>) => string
+  /** Current snapshot; absent on a harness too old to expose the face. */
+  getSnapshot?(): LocaleSnapshot
+  /** Notified on a locale switch or a late dictionary registration. */
+  subscribe?(listener: () => void): () => void
 }
 
 /** Client layout service; `selectPanel` opens a keyed main panel by id. */
@@ -44,4 +55,9 @@ export interface ClientCtx {
   readonly slots: SlotsService
   readonly locale: LocaleService
   readonly layout: LayoutService
+  /**
+   * Register a disposable effect; cordis runs the disposer on stop/HMR reload.
+   * Optional so a test context can omit it.
+   */
+  effect?(callback: () => unknown, label?: string): unknown
 }

@@ -4,14 +4,20 @@
 // A flat table was the original design, but a real host loads 200+ plugins and
 // most are idle in any given window, so the flat list was mostly zeros with the
 // actual consumers lost in the middle. Sections plus the static fold make the
-// signal the default and the zeros opt-in.
+// signal the default and the zeros opt-in. The table caps its own height and
+// pins its header; the page itself scrolls on .pl-root.
+//
+// The harness section additionally shows the host's sub-package breakdown: the
+// folded `harness` row is deliberate, but on its own it hides which internal
+// package costs what (docs/design-overnight-analyzer.md §6.5). Those rows are
+// indented, measured on the same basis, and expandable to hot functions.
 
 import { Fragment, useState } from 'react'
-import type { Hotspot, PerfStats, PluginMetricRow } from '../shared/contract'
+import type { HarnessBreakdownRow, Hotspot, PerfStats, PluginMetricRow } from '../shared/contract'
 import { groupRows, groupShareOf, type PluginGroupId } from '../shared/grouping'
 import { CoverageBadge } from './coverage-badge'
-import { formatBytes, formatOps, formatPercent } from './format'
-import { displayOwner, t } from './i18n'
+import { formatBytes, formatMsPerSecond, formatOps, formatPercent } from './format'
+import { displayHarnessPackage, displayOwner, t } from './i18n'
 import { Sparkline } from './sparkline'
 
 type SortKey = 'cpuShare' | 'liveHeapBytes' | 'fs' | 'allocBytesPerSec'
@@ -37,6 +43,10 @@ export interface MetricsTableProps {
   readonly rows: readonly PluginMetricRow[]
   readonly series: Readonly<Record<string, readonly number[]>>
   readonly coverageThreshold: number
+  /** Window length the cpuSelfMs figures were measured over (absolute-cost basis). */
+  readonly sampleWindowMs: number
+  /** Harness sub-packages shown under the folded harness row (host-provided). */
+  readonly harnessBreakdown?: readonly HarnessBreakdownRow[]
   /** Expanded plugin module names; enables the hot-function detail rows. */
   readonly expanded?: ReadonlySet<string>
   /** Hot functions keyed by module name, filled lazily on expand. */
@@ -46,17 +56,46 @@ export interface MetricsTableProps {
   readonly stats?: PerfStats | null
 }
 
+/**
+ * Widen a breakdown row into the table's row shape.
+ *
+ * A harness package has no loader entry, fiber phase, allocation figure or
+ * coverage, so those cells stay empty and the renderer prints a dash for them
+ * rather than a fake zero.
+ */
+export function breakdownToRow(row: HarnessBreakdownRow): PluginMetricRow {
+  return {
+    moduleName: row.moduleName,
+    entryId: '',
+    fiberPhase: '',
+    cpuShare: row.cpuShare,
+    cpuSelfMs: row.cpuSelfMs,
+    liveHeapBytes: row.liveHeapBytes,
+    allocBytesPerSec: 0,
+    fsReadOps: row.fsReadOps,
+    fsWriteOps: row.fsWriteOps,
+    fsReadBytes: 0,
+    fsWriteBytes: 0,
+    coverage: 0,
+    timers: 0,
+    listeners: 0,
+    handles: 0,
+    diskFootprintBytes: 0,
+  }
+}
+
 export function MetricsTable({
-  rows, series, coverageThreshold, expanded, hotspots, onToggle, stats,
+  rows, series, coverageThreshold, sampleWindowMs, harnessBreakdown, expanded, hotspots, onToggle, stats,
 }: MetricsTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('cpuShare')
   const [openStatic, setOpenStatic] = useState<ReadonlySet<PluginGroupId>>(new Set())
+  // Expanded by default: the fold is what hid the answer in the first place
+  // (docs/design-overnight-analyzer.md §6.5), so the ranking is the default view.
+  const [openBreakdown, setOpenBreakdown] = useState(true)
   const groups = groupRows(rows)
   const byName = new Map((stats?.plugins ?? []).map(row => [row.moduleName, row]))
-  const cell: React.CSSProperties = { padding: '4px 8px', textAlign: 'right', whiteSpace: 'nowrap' }
-  const head: React.CSSProperties = { ...cell, opacity: 0.7, cursor: 'pointer', userSelect: 'none' }
   const clickable = onToggle !== undefined
-  const nameCell: React.CSSProperties = { ...cell, textAlign: 'left', cursor: clickable ? 'pointer' : 'default' }
+  const breakdown = harnessBreakdown ?? []
 
   const toggleStatic = (id: PluginGroupId): void => {
     setOpenStatic(previous => {
@@ -67,18 +106,24 @@ export function MetricsTable({
     })
   }
 
-  const detailRow = (row: PluginMetricRow, colSpan: number) => {
-    const detail = hotspots?.[row.moduleName]
+  const sortHeader = (key: SortKey, label: string) => (
+    <th className="pl-th pl-th-sort" onClick={() => { setSortKey(key) }}>
+      {label}{sortKey === key ? ' ▾' : ''}
+    </th>
+  )
+
+  const detailRow = (moduleName: string, colSpan: number) => {
+    const detail = hotspots?.[moduleName]
     return (
       <tr>
-        <td colSpan={colSpan} style={{ padding: '4px 8px 8px 20px', opacity: 0.9 }}>
-          <div style={{ marginBottom: '2px', opacity: 0.7 }}>{t('hotspot')}</div>
+        <td colSpan={colSpan} className="pl-detail">
+          <div className="pl-note" style={{ marginBottom: '2px' }}>{t('hotspot')}</div>
           {detail === undefined || detail.length === 0
-            ? <div style={{ opacity: 0.6 }}>{t('hotspotNone')}</div>
+            ? <div className="pl-td-dim">{t('hotspotNone')}</div>
             : detail.map(item => (
-              <div key={item.url + ':' + item.lineNumber + ':' + item.functionName} style={{ display: 'flex', gap: '8px' }}>
-                <span style={{ minWidth: '150px' }}>{item.functionName}</span>
-                <span style={{ opacity: 0.7, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <div key={item.url + ':' + item.lineNumber + ':' + item.functionName} className="pl-detail-row">
+                <span className="pl-detail-fn">{item.functionName}</span>
+                <span className="pl-detail-url">
                   {item.url === '' ? '' : item.url + ':' + item.lineNumber}
                 </span>
                 <span>{item.selfMs.toFixed(2)}ms</span>
@@ -89,72 +134,86 @@ export function MetricsTable({
     )
   }
 
-  const dataRow = (row: PluginMetricRow) => {
+  const dataRow = (row: PluginMetricRow, sub = false) => {
     const isOpen = expanded?.has(row.moduleName) ?? false
     const aggregated = byName.get(row.moduleName)
+    const nameClass = [
+      'pl-td', 'pl-td-left', 'pl-td-name',
+      sub ? 'pl-td-sub' : '',
+      clickable ? 'pl-td-click' : '',
+    ].filter(part => part !== '').join(' ')
     return (
-      <Fragment key={row.entryId === '' ? row.moduleName : row.entryId}>
-        <tr>
-          <td style={nameCell} onClick={clickable ? () => { onToggle(row.moduleName) } : undefined}>
-            {clickable ? (isOpen ? '▾ ' : '▸ ') : ''}{displayOwner(row.moduleName)}
+      <Fragment key={(sub ? 'sub:' : '') + (row.entryId === '' ? row.moduleName : row.entryId)}>
+        <tr className={sub ? 'pl-row pl-row-sub' : 'pl-row'}>
+          <td className={nameClass} onClick={clickable ? () => { onToggle(row.moduleName) } : undefined}>
+            {clickable ? (isOpen ? '▾ ' : '▸ ') : ''}
+            {sub ? displayHarnessPackage(row.moduleName) : displayOwner(row.moduleName)}
           </td>
-          <td style={cell}>{formatPercent(row.cpuShare)}</td>
-          <td style={cell}>{aggregated === undefined ? '—' : formatPercent(aggregated.avgCpuShare)}</td>
-          <td style={cell}>{aggregated === undefined ? '—' : formatPercent(aggregated.peakCpuShare)}</td>
-          <td style={cell}><Sparkline values={series[row.moduleName] ?? []} /></td>
-          <td style={cell}>{formatBytes(row.liveHeapBytes)}</td>
-          <td style={cell}>{formatOps(row.fsReadOps, row.fsWriteOps)}</td>
-          <td style={cell}>{row.allocBytesPerSec === 0 ? '—' : formatBytes(row.allocBytesPerSec) + '/s'}</td>
-          <td style={cell}><CoverageBadge coverage={row.coverage} threshold={coverageThreshold} /></td>
+          <td className="pl-td">{formatPercent(row.cpuShare)}</td>
+          <td className="pl-td" title={t('idleBasisHint')}>{formatMsPerSecond(row.cpuSelfMs, sampleWindowMs)}</td>
+          <td className="pl-td">{aggregated === undefined ? '—' : formatPercent(aggregated.avgCpuShare)}</td>
+          <td className="pl-td">{aggregated === undefined ? '—' : formatPercent(aggregated.peakCpuShare)}</td>
+          <td className="pl-td"><Sparkline values={series[row.moduleName] ?? []} /></td>
+          <td className="pl-td">{formatBytes(row.liveHeapBytes)}</td>
+          <td className="pl-td">{formatOps(row.fsReadOps, row.fsWriteOps)}</td>
+          <td className="pl-td">{sub || row.allocBytesPerSec === 0 ? '—' : formatBytes(row.allocBytesPerSec) + '/s'}</td>
+          <td className="pl-td">
+            {sub ? <span className="pl-td-dim">—</span> : <CoverageBadge coverage={row.coverage} threshold={coverageThreshold} />}
+          </td>
         </tr>
-        {isOpen ? detailRow(row, 9) : null}
+        {isOpen ? detailRow(row.moduleName, 10) : null}
       </Fragment>
     )
   }
 
-  const groupHead: React.CSSProperties = {
-    padding: '6px 8px', textAlign: 'left', opacity: 0.9, borderTop: '1px solid currentColor',
-  }
-
   return (
-    <div style={{ maxHeight: '48vh', overflow: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+    <div className="pl-table-wrap">
+      <table className="pl-table">
         <thead>
           <tr>
-            <th style={{ ...cell, textAlign: 'left' }}>{t('plugin')}</th>
-            <th style={head} onClick={() => { setSortKey('cpuShare') }}>{t('cpu')}{sortKey === 'cpuShare' ? ' ▾' : ''}</th>
-            <th style={cell}>{t('avg')}</th>
-            <th style={cell}>{t('peak')}</th>
-            <th style={cell}>{t('spark')}</th>
-            <th style={head} onClick={() => { setSortKey('liveHeapBytes') }}>{t('liveHeap')}{sortKey === 'liveHeapBytes' ? ' ▾' : ''}</th>
-            <th style={head} onClick={() => { setSortKey('fs') }}>{t('disk')}{sortKey === 'fs' ? ' ▾' : ''}</th>
-            <th style={head} onClick={() => { setSortKey('allocBytesPerSec') }}>{t('alloc')}{sortKey === 'allocBytesPerSec' ? ' ▾' : ''}</th>
-            <th style={cell}>{t('coverage')}</th>
+            <th className="pl-th pl-th-left">{t('plugin')}</th>
+            {sortHeader('cpuShare', t('cpu'))}
+            <th className="pl-th" title={t('absoluteHint')}>{t('absolute')}</th>
+            <th className="pl-th">{t('avg')}</th>
+            <th className="pl-th">{t('peak')}</th>
+            <th className="pl-th">{t('spark')}</th>
+            <th className="pl-th pl-th-sort" title={t('liveHeapHint')} onClick={() => { setSortKey('liveHeapBytes') }}>{t('liveHeap')}{sortKey === 'liveHeapBytes' ? ' ▾' : ''}</th>
+            {sortHeader('fs', t('disk'))}
+            {sortHeader('allocBytesPerSec', t('alloc'))}
+            <th className="pl-th" title={t('coverageHint')}>{t('coverage')}</th>
           </tr>
         </thead>
         <tbody>
           {groups.map(group => {
             const sorted = [...group.rows].sort((left, right) => sortValue(right, sortKey) - sortValue(left, sortKey))
             const staticOpen = openStatic.has(group.id)
+            const showBreakdown = group.id === 'harness' && breakdown.length > 0
             return (
               <Fragment key={group.id}>
-                <tr>
-                  <th colSpan={9} style={groupHead}>
-                    <span style={{ fontWeight: 600 }}>{t(GROUP_LABEL[group.id])}</span>
-                    <span style={{ opacity: 0.6 }}> · {sorted.length}</span>
-                    {sorted.length > 0 ? <span style={{ opacity: 0.6 }}> · {formatPercent(groupShareOf(group))}</span> : null}
-                    {group.staticRows.length > 0 ? (
+                <tr className="pl-group-row">
+                  <th colSpan={10} className="pl-th">
+                    <span>{t(GROUP_LABEL[group.id])}</span>
+                    <span className="pl-group-meta"> · {sorted.length}</span>
+                    {sorted.length > 0 ? <span className="pl-group-meta"> · {formatPercent(groupShareOf(group))}</span> : null}
+                    {showBreakdown ? (
                       <button
-                        onClick={() => { toggleStatic(group.id) }}
-                        style={{ marginLeft: '8px', opacity: 0.7, cursor: 'pointer', fontSize: '11px' }}
+                        className="pl-fold-btn"
+                        title={t('harnessBreakdownHint')}
+                        onClick={() => { setOpenBreakdown(previous => !previous) }}
                       >
+                        {(openBreakdown ? '▾ ' : '▸ ') + t('harnessBreakdown') + ' Top ' + breakdown.length}
+                      </button>
+                    ) : null}
+                    {group.staticRows.length > 0 ? (
+                      <button className="pl-fold-btn" onClick={() => { toggleStatic(group.id) }}>
                         {(staticOpen ? '▾ ' : '▸ ') + t('staticFold') + ' ' + group.staticRows.length}
                       </button>
                     ) : null}
                   </th>
                 </tr>
-                {sorted.map(dataRow)}
-                {staticOpen ? group.staticRows.map(dataRow) : null}
+                {sorted.map(row => dataRow(row))}
+                {showBreakdown && openBreakdown ? breakdown.map(row => dataRow(breakdownToRow(row), true)) : null}
+                {staticOpen ? group.staticRows.map(row => dataRow(row)) : null}
               </Fragment>
             )
           })}

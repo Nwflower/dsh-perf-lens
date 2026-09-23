@@ -1,6 +1,8 @@
 // Coverage marker for partial metrics. Hard constraint 4: a value measured over
 // a subset of call sites must never look as trustworthy as an exact one.
 
+import { t } from './i18n'
+
 export interface CoverageBadgeProps {
   readonly coverage: number
   readonly threshold: number
@@ -12,14 +14,10 @@ export function CoverageBadge({ coverage, threshold, label }: CoverageBadgeProps
   const low = coverage < threshold
   return (
     <span
-      title={low ? `覆盖不足：仅 ${percent}%（阈值 ${Math.round(threshold * 100)}%）` : undefined}
-      style={{
-        color: low ? 'var(--dsw-color-warning, #c98a00)' : 'inherit',
-        opacity: low ? 1 : 0.7,
-        whiteSpace: 'nowrap',
-      }}
+      title={low ? t('coverageLowTitle', { percent, threshold: Math.round(threshold * 100) }) : undefined}
+      className={low ? 'pl-cov pl-cov-low' : 'pl-cov'}
     >
-      {percent}%{low ? ' ⚠' : ''}{label === undefined ? '' : ` ${label}`}
+      {percent}%{low ? ' ⚠' : ''}{label === undefined ? '' : ' ' + label}
     </span>
   )
 }

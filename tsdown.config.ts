@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { isBuiltin } from 'node:module'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 import { defineConfig } from 'tsdown'
 
 // Read the manifest from cwd: the config file's own URL is not guaranteed to sit
@@ -43,6 +44,50 @@ const isProductionDependency = (specifier: string): boolean =>
   productionPatterns.some(pattern => pattern.test(specifier))
 
 const NODE_ENV = process.env.NODE_ENV ?? 'production'
+
+// Global-CSS inline channel, mirrored (minus the minifier) from dsh-context's
+// tsdown.config.ts and packages/client/tsdown.client.ts: a client bundle ships
+// as ONE js file, so a stylesheet import becomes a self-injecting <style> tag
+// instead of an emitted asset. The virtual id must NOT end in '.css' —
+// tsdown's own css-pipeline guard matches on that suffix; the flat pl-*
+// class namespace is the anti-collision rule.
+const GLOBAL_CSS_VIRTUAL_PREFIX = '\0dsh-global-css:'
+const CSS_VIRTUAL_SUFFIX = '.mjs'
+
+function styleInjectionModule(id: string, fileId: string, css: string): string {
+  return [
+    `const css = ${JSON.stringify(css)};`,
+    `const tagId = ${JSON.stringify(`${id}/${basename(fileId)}`)};`,
+    `if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css=' + JSON.stringify(tagId) + ']') === null) {`,
+    `  const tag = document.createElement('style');`,
+    `  tag.dataset.plugin = ${JSON.stringify(id)};`,
+    `  tag.dataset.pluginCss = tagId;`,
+    `  tag.textContent = css;`,
+    `  document.head.appendChild(tag);`,
+    `}`,
+    'export {};',
+  ].join('\n')
+}
+
+// The panel ships a single small sheet, so the raw source is embedded
+// unminified — a minifier dependency is weight this package refuses for a
+// few KB of CSS (docs/design.md: no CSS toolchain for one panel).
+const globalCssChannel = (id: string) => ({
+  name: 'dsh-css-global-inline',
+  resolveId(source: string, importer: string | undefined) {
+    if (!source.endsWith('.css') || source.endsWith('.module.css')) return null
+    const abs = importer !== undefined ? resolvePath(dirname(importer), source) : source
+    return GLOBAL_CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+  },
+  async load(this: { addWatchFile(file: string): void }, virtualId: string) {
+    if (!virtualId.startsWith(GLOBAL_CSS_VIRTUAL_PREFIX)) return null
+    const fileId = virtualId.slice(GLOBAL_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+    // The virtual id otherwise hides the physical stylesheet from the watch graph.
+    this.addWatchFile(fileId)
+    const css = await readFile(fileId, 'utf8')
+    return styleInjectionModule(id, fileId, css)
+  },
+})
 
 export default defineConfig([
   {
@@ -97,7 +142,7 @@ export default defineConfig([
           + '(type-only imports are erased and never reach this gate)',
         )
       },
-    }],
+    }, globalCssChannel(pkg.name)],
     outputOptions: {
       entryFileNames: 'client.js',
       // The closure-factory handoff every `dsh.client` package's ./client export must
