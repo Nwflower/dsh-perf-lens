@@ -1,118 +1,116 @@
-# 架构设计
+# Architecture
 
-> 状态：**已定稿**（2026-09 评审通过，技术栈、历史留存、看板形态、面板落点四项关键决策已拍板）。
-> 可行性依据见 [feasibility.md](feasibility.md)，实测数据见 [evidence.md](evidence.md)。
-> 本文档与 feasibility.md 的分工：feasibility 回答「能不能做」，本文档回答「怎么做」。
+> Status: **final** (reviewed 2026-09; the four key decisions — tech stack, history retention,
+> dashboard form and panel location — are settled). Items marked *planned* below are designed but not
+> built yet.
+> Feasibility: [feasibility.md](feasibility.md). Measurements: [evidence.md](evidence.md).
+> Division of labour: feasibility.md answers "can it be done", this document answers "how".
 
 ---
 
-## 1. 技术栈决策
+## 1. Tech stack
 
-两个参考仓库各代表一条已验证的路线，对比后选定：
+The two reference repositories each represent a proven route. After comparing them:
 
-| 维度 | 纯 JS ESM（dsh-chat-import 路线） | **TypeScript + tsdown（dsh-context 路线）✔ 选定** |
+| Aspect | Plain JS ESM (the dsh-chat-import route) | **TypeScript + tsdown (the dsh-context route) ✔ chosen** |
 | --- | --- | --- |
-| Host 源码 | lib/*.mjs 手写直发，零构建 | src/host/*.ts → tsdown 产出 lib/index.js |
-| Client 产物 | 自研片段拼装脚本（契约靠约定） | tsdown 单入口产出自包含 lib/client.js |
-| 类型保护 | 无 | **有**——采样状态机、profile 树回溯、指标契约是复杂逻辑 |
-| 单测 | node --test | **vitest**（fake timers、覆盖率，dsh-context 已验证） |
+| Host source | Hand-written lib/*.mjs shipped as is, no build | src/host/*.ts → tsdown → lib/index.js |
+| Client output | A home-grown fragment-joining script (contract by convention) | tsdown, one entry → self-contained lib/client.js |
+| Type safety | None | **Yes** — the sampling state machine, profile-tree walk and metric contract are the complex parts |
+| Unit tests | node --test | **vitest** (fake timers, coverage; proven in dsh-context) |
 | Lint | eslint | **oxlint** |
 
-选定理由：本插件的核心是**采样状态机 + 调用树回溯 + 双端共享的指标契约**，
-恰恰是全仓库类型密度最高的部分；client 侧表格/徽标/看板组件用 TSX 写远比
-字符串拼装可维护。tsdown 一份配置同时覆盖 host 与 client 两个产物，
-取代脆弱的片段拼装契约。
+Why: the core of this plugin is **a sampling state machine, a call-tree walk and a metric contract
+shared by both halves** — the most type-heavy code in the whole workspace. Tables, badges and charts
+are far easier to maintain as TSX than as string assembly. One tsdown config builds both the host and
+the client output, replacing a fragile fragment-joining contract.
 
-### 1.1 依赖清单
+### 1.1 Dependencies
 
-**运行时依赖：零。** 只依赖 Node 内置（node:inspector / node:async_hooks /
-node:v8 / node:perf_hooks）与 cordis 注入的服务。不引入任何 npm 运行时包——
-本插件测的就是别人的开销，自己必须先做到零负担。
+**Runtime dependencies: none.** Only Node built-ins (node:inspector / node:async_hooks / node:v8 /
+node:perf_hooks) and services injected by cordis. No npm runtime package: a tool that measures other
+plugins' cost has to carry none of its own.
 
-**peerDependencies**：@deepseek-ai/cordis、@deepseek-ai/dsh、
-@deepseek-ai/dsh-client-locale、@deepseek-ai/dsh-client-ui-primitives、
-@deepseek-ai/schemastery（插件配置 Schema）、react（≥18）。
+**peerDependencies:** @deepseek-ai/cordis, @deepseek-ai/dsh, @deepseek-ai/dsh-client-locale,
+@deepseek-ai/dsh-client-ui-layout, @deepseek-ai/dsh-client-ui-sidebar, react (≥ 18).
 
-**devDependencies**：typescript（跟随 dsh-context 的版本线）、tsdown、
-vitest、@vitest/coverage-v8、oxlint、react / react-dom /
-@types/react / @types/react-dom、@types/node。
+**devDependencies:** typescript (following dsh-context's version line), tsdown, vitest,
+@vitest/coverage-v8, oxlint, react / react-dom / @types/react / @types/react-dom, @types/node,
+jsdom and @testing-library for the client tests.
 
-**client 构建 externals**（镜像 dsh-context 的平台模块表，走注入的 require，不内联）：
-react、react/jsx-runtime、react-dom、react-dom/client、@deepseek-ai/cordis、
-@deepseek-ai/dsh-client-store、@deepseek-ai/dsh-client-ui-slots、
-@deepseek-ai/dsh-client-ui-primitives。
+**Client build externals** (mirroring the harness's platform module table; they come from the
+injected `require` and are never inlined): react, react/jsx-runtime, react-dom, react-dom/client,
+@deepseek-ai/cordis, @deepseek-ai/dsh-client-store, @deepseek-ai/dsh-client-ui-slots,
+@deepseek-ai/dsh-client-ui-primitives.
 
-**不引入 tailwind**：看板 = 表格 + sparkline + 全局条，用
-dsh-client-ui-primitives 的设计令牌内联样式即可（dsh-chat-import 的做法），
-不为一个面板引入整条 CSS 工具链。sparkline 用 SVG 手绘，不引图表库。
+**No tailwind, no chart library.** The panel is one stylesheet (`src/client/styles/panel.css`, built
+on the harness theme's `--dsw-alias-*` tokens) that tsdown inlines into the client bundle, and every
+chart is hand-drawn SVG. A whole CSS or charting toolchain is not worth it for one panel.
 
-### 1.2 目录结构
+### 1.2 Layout
 
 ```
 src/
-  host/                  // host process side (Node)
-    index.ts             // [done] composition root: name / inject / apply
-    ctx.ts               // [done] structural HostCtx faces (loader / webServer)
-    plugin-index.ts      // [done] ctx.loader.entries() -> path prefix -> owner map
-    attribute.ts         // [done] ancestor-walk attribution (pure, zero ctx deps)
-    sampler.ts           // [done] inspector state machine, paired start/stop
-    io-tracker.ts        // [done] async_hooks counters + read/write split
-    metrics.ts           // [done] global metrics (heap / lag / GC / resourceUsage)
-    history.ts           // [done] ring buffer + JSONL persistence (rotation / retention)
-    lens.ts              // [done] duty-cycle / continuous orchestration + snapshots
-    routes.ts            // [done] /api-perf/* routes (webServer late injection)
-    stats.ts             // [done] range aggregation (avg / peak / p95 / cumulative)
-    hotspots.ts          // [done] hot-function Top-N (in-memory only, never persisted)
-    vitals.ts            // [done] browser foreground-vitals ring (in-memory only)
-    footprint.ts         // [todo] directory byte scan (path -> owner)
-    self-monitor.ts      // [todo] own-overhead self measurement and reporting
-  client/                // browser side
-    index.tsx            // [done] entry: sidebar.panellist + main registration
-    ctx.ts               // [done] structural ClientCtx faces (slots / locale / layout)
-    sidebar-entry.tsx    // [done] sidebar.panellist icon row (dsh >= 0.1.7 panel pattern)
-    panel.tsx            // [done] main-panel task-manager board
-    api.ts               // [done] /api-perf/* polling (interval follows sample window)
-    format.ts            // [done] byte / percent / duration formatting
-    metrics-table.tsx    // [done] sortable per-plugin table
-    global-bar.tsx       // [done] global strip + coverage warnings
-    control-bar.tsx      // [done] pause / continuous / deep controls
-    coverage-badge.tsx   // [done] partial-metric marker
-    sparkline.tsx        // [done] inline SVG sparkline (no chart lib)
-    trend-chart.tsx      // [done] multi-plugin CPU trend, hides sub-threshold plugins
-    scoreboard.tsx       // [done] cumulative-cost ranking (avg / p95 / peak / estimate)
-    vitals.ts            // [done] long-task + rAF foreground reporter
-    plugin-cards.tsx     // [done] top-consumer cards (current / avg / peak)
-    metrics-table.tsx    // [done] grouped rows + static fold + avg/peak columns
-    i18n.ts              // [done] zh dictionary
-    plugin-detail.tsx    // [todo] per-plugin detail (Phase 2 body)
+  host/                    // host process (Node)
+    index.ts               // composition root: name / inject / apply
+    ctx.ts                 // structural HostCtx types (loader / webServer)
+    plugin-index.ts        // ctx.loader.entries() -> path prefix -> owner map
+    attribute.ts           // ancestor-walk attribution (pure, no ctx)
+    async-attribution.ts   // deep mode: async-context re-attribution (mechanism C)
+    sampler.ts             // inspector state machine, paired start/stop
+    io-tracker.ts          // async_hooks counters + read/write split
+    metrics.ts             // process metrics (heap / lag / GC / resourceUsage)
+    history.ts             // ring buffer + JSONL persistence + incremental read cache
+    lens.ts                // duty / continuous / background orchestration + snapshots
+    routes.ts              // /api-perf/* routes (late webServer injection)
+    stats.ts               // range aggregation (avg / peak / p95 / cumulative / trend)
+    hotspots.ts            // hot-function Top-N (in memory only, never persisted)
+    vitals.ts              // browser foreground-vitals ring (in memory only)
+    footprint.ts           // planned: directory byte scan (path -> owner)
+    self-monitor.ts        // planned: measure and report the lens's own overhead
+  client/                  // browser
+    index.tsx              // entry: sidebar.panellist + main registration
+    ctx.ts                 // structural ClientCtx types (slots / locale / layout)
+    sidebar-entry.tsx      // sidebar.panellist icon row (dsh >= 0.1.7 panel pattern)
+    panel.tsx              // main-panel dashboard
+    api.ts                 // /api-perf/* client
+    format.ts              // byte / percent / duration / ms-per-second formatting
+    global-bar.tsx         // process overview tiles + coverage and resolution chips
+    composition.tsx        // process-level CPU and heap composition bars
+    plugin-cards.tsx       // top-consumer cards (current / average / peak)
+    trend-chart.tsx        // multi-plugin CPU trend, hides sub-threshold plugins
+    scoreboard.tsx         // cumulative-cost ranking (avg / p95 / peak / estimate)
+    metrics-table.tsx      // grouped, sortable per-plugin table with folds
+    control-bar.tsx        // pause / continuous / background / deep controls
+    coverage-badge.tsx     // partial-metric marker
+    sparkline.tsx          // inline SVG sparkline
+    vitals.ts              // long-task + rAF foreground reporter
+    error-boundary.tsx     // keeps a render error from blanking the host page
+    palette.ts             // chart series colours
+    i18n.ts                // zh / en dictionaries
+    styles/panel.css       // the panel's one stylesheet
+    plugin-detail.tsx      // planned: per-plugin detail view
   shared/
-    contract.ts          // metric contract types (single source of truth)
-    defaults.ts          // window lengths / duty cycle / thresholds
-    math.ts              // shared percentile helper
-test/
-  attribute.test.ts      // locks the 3.33 ratio fixture + synthetic tree walk
-  sampler.test.ts        // start/stop pairing / unload stop / continuous toggle
-  io-tracker.test.ts     // async counts per owner / sync exclusion / calibration
-  history.test.ts        // ring semantics / JSONL rotation / retention sweep
-  stats.test.ts          // range aggregation arithmetic
-  hotspots.test.ts       // hot-function grouping + never-persisted assertion
-  vitals.test.ts         // vitals ring + untrusted body parsing
-scripts/                 // build & local wiring (register / web smoke)
+    contract.ts            // metric contract types (single source of truth)
+    defaults.ts            // window lengths / duty cycle / thresholds
+    grouping.ts            // owner groups and the "no cost this window" rule
+    math.ts                // shared percentile helper
+test/                      // host specs in node, test/client/ specs in jsdom
 ```
 
-`attribute.ts` 与 `shared/` 保持**零 ctx 依赖纯函数**，是单测的核心靶区；
-其余 host 模块都是消费 ctx 的薄壳（同 dsh-chat-import 的
-「lib/convert/* 纯函数 / 其余薄壳」分层）。
+`attribute.ts`, `stats.ts` and `shared/` stay **pure functions with no ctx dependency** and are the
+main unit-test targets. The other host modules are thin shells around ctx (the same split as
+dsh-chat-import's "pure lib/convert/*, thin shells elsewhere").
 
 ---
 
-## 2. 分层架构
+## 2. Layers
 
 ```
 +-- Client (browser) --------------------------------------------------+
 |  lib/client.js                                                       |
 |    sidebar-entry -> sidebar.panellist (left nav row, like Plugins)   |
-|    panel         -> main (keyed panel, task-manager board)           |
+|    panel         -> main (keyed panel, dashboard)                    |
 |    polls /api-perf/* (interval follows the active sample window)     |
 +----------------------------------------------------------------------+
                     ^ HTTP (webServer.register, late injection)
@@ -122,104 +120,134 @@ scripts/                 // build & local wiring (register / web smoke)
 |  PluginIndex       ctx.loader.entries() -> module path -> plugin     |
 |  Sampler           inspector state machine: CPU / heap, duty cycle   |
 |  Attributor        ancestor stack walk -> per-plugin attribution     |
-|  IoTracker         async_hooks counts + ctx.fs wrap + calibration    |
-|  FootprintScanner  directory byte scan (path -> owner)               |
-|  Metrics           global metrics collection                         |
-|  HistoryStore      ring buffer + JSONL persistence (default on)      |
-|  SelfMonitor       own-overhead self measurement                     |
+|  AsyncRecorder     deep mode: async windows -> re-attribution        |
+|  IoTracker         async_hooks counts + process-level calibration    |
+|  Metrics           process metrics                                   |
+|  HistoryStore      ring buffer + JSONL persistence (on by default)   |
+|  FootprintScanner  planned: directory byte scan (path -> owner)      |
+|  SelfMonitor       planned: own-overhead measurement                 |
 +----------------------------------------------------------------------+
 ```
 
-Host 入口约定（与 dsh-chat-import 同构，已核实）：
+Host entry conventions (same shape as dsh-chat-import, verified):
 
-- `inject = ['loader']`；**webServer 不进 inject**——它是可选且晚挂载的 host 服务，
-  硬依赖会让插件在 headless profile 下无法激活。路由在 apply 内经
-  ctx.inject(['webServer'], ...) 可选注册。
-- 路由 API：ws.register({ kind: 'exact' | 'prefix', path, handler })，返回 disposer，
-  交给 cordis effect 管理。
-- 插件卸载时**无条件停止采样**（cordis effect disposer），不留后台采样。
+- `inject = ['loader']`. **webServer is not in `inject`**: it is an optional, late-mounted host
+  service, and a hard dependency would stop the plugin from activating in a headless profile. Routes
+  are registered inside `apply` through `ctx.inject(['webServer'], ...)`.
+- Route API: `ws.register({ kind: 'exact' | 'prefix', path, handler })` returns a disposer, which is
+  handed to a cordis effect.
+- Unloading the plugin **stops sampling unconditionally** (cordis effect disposer). Nothing keeps
+  sampling in the background.
 
-Client 入口约定（对齐 dsh 0.1.7 新引入的插件面板 @deepseek-ai/dsh-client-ui-plugin-manager，
-已核实其 lib/client.js 的注册代码与 sidebar/layout 槽位契约）：
+Client entry conventions (aligned with the plugin panel dsh 0.1.7 introduced,
+@deepseek-ai/dsh-client-ui-plugin-manager, whose lib/client.js registration code and sidebar/layout
+slot contracts were checked):
 
-- **落点 = 左栏条目 + 主区面板**（与内置「插件」面板同构，需 dsh ≥ 0.1.7-alpha.1）：
-  1. ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
-       { name: 'sidebar.panellist', id: PANEL_ID, order: 10,
-         label: () => t('panel'), locale: NS }, SidebarEntry))
-     —— sidebar.panellist 是 kind: 'list' 的全局面板图标列表，其 id 与 main 面板的 key 对应，
-        由 sidebar 拥有按钮并解析 label；SidebarEntry 收到 { size, active }。
-  2. ctx.slots.inject('main', () => ctx.slots.register(
-       { name: 'main', key: PANEL_ID, locale: NS, inject, children }, PerfPanel))
-     —— main 是 kind: 'keyed' 的主区面板，key 与 sidebar 条目的 id 对应；
-        预留 conversation 之外的 key 不绑定 Session。
-- 导航：ctx.layout.selectPanel(PANEL_ID)（ctx.layout 是 ILayout 服务，暴露
-  activePanelId / selectPanel）。
-- client 模块导出 inject = ['slots', 'locale', 'layout']；package.json 的
-  dsh.client.inject 声明 ['@deepseek-ai/dsh-client-locale',
-  '@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-sidebar']，
-  dsh.client.platform = 'web'。
-- 右侧栏迷你视图（sidebar.right.pane.tab）降为 Phase 2 可选形态，不阻塞 v1。
-
----
-
-## 3. 任务管理器看板（v1 核心形态）
-
-**能做到，且机制全部现成。** 看板不是新数据源，而是 §2 各采集器的连续渲染：
-
-### 3.1 落点形态
-
-| 形态 | 落点 | 内容 |
-| --- | --- | --- |
-| **左栏条目** | sidebar.panellist | 图标 + 标签「性能」，与内置「插件」面板并列（dsh ≥ 0.1.7） |
-| **主区看板** | main（keyed，key 同条目 id） | 实时表格 + 每插件 sparkline + 全局条 + 控制区 + 未归属警告 + 历史曲线 |
-| 迷你视图（Phase 2 可选） | sidebar.right.pane.tab | 常驻右侧栏的可排序精简表格 |
-
-### 3.2 实时性的诚实边界
-
-采样本身是窗口制的，「实时」粒度天然 = 采样窗口粒度。不需要 WebSocket：
-轮询 /api-perf/snapshot 即可，间隔跟随当前窗口。
-
-### 3.3 连续采样模式（看板打开时）
-
-默认占空比（5s 采样 / 30s 睡眠）下看板会有「停滞感」。设计：
-
-- **看板可见时**，client 通过 POST /api-perf/control { mode: 'continuous' }
-  让 host 把 idleMs 降为 0、窗口缩短（默认 2s，可配），实现秒级刷新的
-  任务管理器体验；
-- **看板关闭 / 页签切走时**发 { mode: 'duty' } 退回占空比；
-- 连续模式有**开销上限保险**：连续运行超过 continuousMaxMs（默认 10 分钟）
-  自动退回占空比并在 UI 提示；
-- UI 常驻显示当前模式与采样自身开销（SelfMonitor），开销只在用户
-  盯着看板时发生——这正是 feasibility「按需深度采样」结论的产品化。
-
-### 3.4 sparkline 与历史曲线
-
-- sparkline：内存环状缓冲（最近 1 小时全分辨率），每插件 CPU / 存活堆两条迷你线；
-- 历史曲线：读 JSONL 落盘数据（见 §7），可选时间范围；
-- 均为 SVG 手绘，零依赖。
+- **Location = a left-nav entry plus a main-column panel** (the same shape as the built-in Plugins
+  panel; needs dsh ≥ 0.1.7-alpha.1):
+  1. `ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist',
+     id: PANEL_ID, order: 10, label: () => t('title'), locale: NS }, SidebarEntry))`
+     — `sidebar.panellist` is a `kind: 'list'` slot of global panel icons. Its `id` matches the main
+     panel's `key`; the sidebar owns the button and resolves the label, and `SidebarEntry` receives
+     `{ size, active }`.
+  2. `ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS },
+     PerfPanel))`
+     — `main` is a `kind: 'keyed'` slot. A key other than the reserved `conversation` is not bound to
+     a session.
+- Navigation: `ctx.layout.selectPanel(PANEL_ID)` (`ctx.layout` is the ILayout service exposing
+  `activePanelId` / `selectPanel`).
+- The client module exports `inject = ['slots', 'locale']`. `package.json` declares
+  `dsh.client.inject = ['@deepseek-ai/dsh-client-locale', '@deepseek-ai/dsh-client-ui-layout',
+  '@deepseek-ai/dsh-client-ui-sidebar']` (which pins the load order of the packages providing those
+  services) and `dsh.client.platform = 'web'`.
+- **Bilingual (zh / en).** `i18n.ts` exports `DICT_ZH` and `DICT_EN`. The English dictionary is typed
+  as a full `Record<MessageKey, string>`, so a missing or extra key is a compile error; the harness
+  also rejects an unbalanced pair at registration. `apply()` registers the dictionaries through
+  `ctx.effect` (stop/HMR disposes them; a duplicate namespace/locale registration would throw) and
+  pushes the active locale into `setActiveLocale` via `ctx.locale.subscribe`. `t()` reads the current
+  dictionary at call time and the panel re-renders on a switch, so **changing language needs no
+  reload**. The module defaults to Chinese (for tests and a host without a locale service); unknown
+  locales fall back to English, like the harness's `FALLBACK_LOCALE`. Messages with parameters use
+  `{name}` placeholders (for example `moreLines`) so components never assemble sentences in a fixed
+  word order.
+- **Copy rules (after the 2026-09 review).** No label may contain jargon a reader cannot decode.
+  Everyday developer abbreviations (CPU, GC, p95) stay, but each has a `*Hint` entry, shown as a
+  `title` tooltip on KPI tiles, control buttons and table headers, that says what the number is and
+  how to read it — never what the code is doing. Replaced wording: 占空比 → 间歇采样 (duty cycle →
+  intermittent sampling), 自身开销 → 本插件开销 (self cost → this plugin's overhead), harness 内核 →
+  harness 内置 (harness kernel → harness built-ins), 存活堆 → 存活对象 (live heap → live objects),
+  未归属 → 无法归属 (unattributed → cannot be attributed), 原生 / libuv → 原生 / 系统调用 (native /
+  libuv → native / syscalls). Tests lock both "retired words never return" and "every dense label has
+  a hint".
+- A compact right-sidebar view (`sidebar.right.pane.tab`) is an optional Phase 2 form and does not
+  block v1.
 
 ---
 
-## 4. 归因算法（核心）
+## 3. The dashboard (the v1 core)
 
-### 4.1 插件索引
+**Fully feasible with existing mechanisms.** The dashboard is not a new data source; it is a
+continuous rendering of the collectors in §2.
 
-由 ctx.loader.entries() 建立：moduleName → 解析基准 baseUrl + 包目录 → 路径前缀集合。
+### 3.1 Where the panel lives
 
-帧分类：
-
-| 类别 | 判定 | 展示 |
+| Form | Slot | Content |
 | --- | --- | --- |
-| plugin:<name> | 路径落在某插件包目录内 | 按插件独立成行 |
-| harness-core | 路径落在 @deepseek-ai/dsh-* 核心包内 | 折叠为一行「harness 内核」 |
-| dep-of:<plugin> | 落在共享 node_modules，且回溯到某插件 | **并入该插件**（不单列） |
-| runtime | node:*、native、(root) | 折叠为「运行时」 |
-| self | 本插件自身路径 | **从所有归因中剔除**（开销由 SelfMonitor 单列） |
+| **Left-nav entry** | `sidebar.panellist` | Icon plus the label "Perf Lens" (性能透镜), next to the built-in Plugins panel (dsh ≥ 0.1.7) |
+| **Main dashboard** | `main` (keyed; key = the entry's id) | Overview, composition, cards, trend, ranking, grouped table and controls (§10.1) |
+| Compact view (optional, Phase 2) | `sidebar.right.pane.tab` | An always-visible sortable table in the right sidebar |
 
-### 4.2 采样点归属
+### 3.2 How "live" it can honestly be
 
-CPU profile 的 nodes[] 是调用树，children[] 给出子节点，需自建反向父指针表。
-对每个采样打点：
+Sampling works in windows, so "real time" can never be finer than one window. No WebSocket is
+needed: polling `/api-perf/snapshot` is enough, at an interval that follows the current window.
+
+### 3.3 Continuous sampling
+
+Under the default duty cycle (sample 5s, sleep 30s or longer) the dashboard can feel frozen. So:
+
+- The control bar's **Continuous sampling** button sends `POST /api-perf/control
+  { mode: 'continuous' }`: the host drops the sleep to 0 and shortens the window (2s by default),
+  giving a task-manager feel with updates every couple of seconds. Clicking it again returns to
+  `duty`.
+- Continuous mode has a **cost ceiling**: after `continuousMaxMs` (10 minutes by default) the host
+  falls back to the duty cycle on its own, so it cannot be left on by accident.
+- The header chip always shows the active mode. The cost is paid only while someone is looking —
+  which is how the feasibility conclusion "deep sampling on demand" becomes a product feature.
+- *Planned:* switch to continuous automatically while the panel is visible and back when it is
+  hidden, and show the remaining time before the automatic fallback.
+
+### 3.4 Sparklines and history
+
+- Sparklines: the panel keeps each plugin's last 30 CPU-share readings, seeded from
+  `/api-perf/trend` on mount so a reload does not start blank.
+- History: the trend chart and ranking read the JSONL log (§7) over a selectable range.
+- All hand-drawn SVG, no dependencies.
+
+---
+
+## 4. Attribution (the core)
+
+### 4.1 Plugin index
+
+Built from `ctx.loader.entries()`: moduleName → resolution anchor `baseUrl` + package directory → a
+set of path prefixes.
+
+Frame classes:
+
+| Class | Rule | Shown as |
+| --- | --- | --- |
+| `plugin:<name>` | The path is inside a plugin's package directory | Its own row |
+| `harness:<pkg>` | The path is inside a `@deepseek-ai/dsh-*` harness package | Folded into one "Harness built-ins" row, with the top internal packages listed beneath it |
+| dependency of a plugin | Inside shared `node_modules`, reached by walking up to a plugin | **Charged to that plugin** (no separate row) |
+| `runtime:*` | `node:*`, native frames, GC, `(program)` / `(root)` | Split into GC / native / Node internals / event loop, with a `runtime` remainder (evidence 9) |
+| `self` | This plugin's own paths | Its own "This plugin's overhead" row, never charged to anyone else |
+| `idle` | `(idle)` samples | Not a row; removed from the share denominator (§5) |
+
+### 4.2 Assigning a sample
+
+The CPU profile's `nodes[]` is a call tree; `children[]` gives the child links, so a reverse parent
+map has to be built. For each sample:
 
 ```
 walk(node):
@@ -228,61 +256,77 @@ walk(node):
   return walk(parent)
 ```
 
-堆采样树同构（selfSize 加在回溯结果上）。
+The heap sampling tree works the same way (`selfSize` is added to the owner the walk returns).
 
-**为什么不按文件归属**：见 [evidence.md 证据 5](evidence.md#证据-5决定性归因必须做祖先栈回溯)——
-朴素归属会把 573/574 的样本丢进无法归属的桶。这条规则由
-test/attribute.test.ts 的 fixture（pluginA 200 次 / pluginB 60 次经共享依赖，
-断言归因比 ≈ 3.33）**永久锁死**，任何重构不得退化为按帧归属。
+**Why not by file:** see
+[evidence 5](evidence.md#evidence-5-decisive-attribution-must-walk-the-ancestor-stack) — naive
+per-file attribution drops 573 of 574 samples into a bucket nobody owns. The fixture in
+`test/attribute.test.ts` (pluginA 200 calls and pluginB 60 calls through a shared dependency,
+asserting a ratio of about 3.33) **locks this rule in**; no refactor may fall back to per-frame
+attribution.
 
-### 4.3 异步边界
+### 4.3 Async boundaries
 
-采样是**栈驱动**的，天然跨异步边界有效：await 恢复后插件的帧仍在栈上。
-这是选择采样而非「按 ALS 上下文归属」的原因——后者在事件驱动的插件架构里，
-listener 的归属取决于**注册时刻**而非**触发时刻**，会系统性错配。
+Sampling is **stack-driven**, so it naturally works across `await`: when a plugin's async function
+resumes, its frames are back on the stack. That is why sampling was chosen over attributing by
+AsyncLocalStorage context — in an event-driven plugin architecture, a listener's context is decided
+when it is **registered**, not when it **fires**, which would misattribute systematically.
 
-async_hooks 仅用于**文件操作计数**（init 时栈上就有调用方），不用于 CPU/内存归属。
+The one case the stack walk cannot see is a plugin handing work to a harness timer or callback
+("mechanism C"). In deep mode only, `async-attribution.ts` records async_hooks execution windows and
+hands samples inside them back to the plugin that created the resource
+([evidence 11](evidence.md#evidence-11-mechanism-c-async-boundaries-is-attributable),
+[design-overnight-analyzer.md §13.8](design-overnight-analyzer.md)). Otherwise async_hooks is used
+only for **file operation counts** (the caller is on the stack at `init`).
 
 ---
 
-## 5. 指标契约
+## 5. Metric contract
 
-类型定义唯一事实源：src/shared/contract.ts。每插件每窗口一行：
+Single source of truth for the types: `src/shared/contract.ts`. One row per plugin per window:
 
-| 字段 | 单位 | 精度 | 来源 |
+| Field | Unit | Precision | Source |
 | --- | --- | --- | --- |
-| cpuShare | % | 采样估计 | CPU profiler |
-| cpuSelfMs | ms | 采样估计 | CPU profiler |
-| liveHeapBytes | B | 采样估计 | 堆采样 stopSampling |
-| allocBytesPerSec | B/s | 采样估计 | 堆采样树差值 |
-| fsReadOps / fsWriteOps | 次 | **精确** | async_hooks |
-| fsReadBytes / fsWriteBytes | B | **部分覆盖** | ctx.fs 包装（标注覆盖率） |
-| timers / listeners / handles | 个 | 精确 | cordis 生命周期包装 |
-| diskFootprintBytes | B | **精确** | 目录扫描 |
-| fiberPhase | 枚举 | 精确 | ctx.loader |
-| coverage | % | — | 「部分覆盖」项必须携带 |
+| cpuShare | % | sampled estimate | CPU profiler |
+| cpuSelfMs | ms | sampled estimate | CPU profiler |
+| liveHeapBytes | B | sampled estimate | heap sampling (`stopSampling`) |
+| allocBytesPerSec | B/s | sampled estimate | heap sampling tree deltas |
+| fsReadOps / fsWriteOps | count | **exact** | async_hooks |
+| fsReadBytes / fsWriteBytes | B | **partial coverage** | planned: `ctx.fs` wrapper (with coverage); currently 0 |
+| timers / listeners / handles | count | exact | planned: cordis lifecycle wrappers; currently 0 |
+| diskFootprintBytes | B | **exact** | planned: directory scan; currently 0 |
+| fiberPhase | enum | exact | ctx.loader |
+| coverage | % | — | required on every partially covered field |
 
-全局一行：rss / heapUsed / heapTotal / external / arrayBuffers /
-eventLoopLagP99 / gcPauseMs / fsOpsTotal（进程级精确）/ sampleWindowMs / sampleCount / idleSamples。
+Plus one process row: rss / heapUsed / heapTotal / external / arrayBuffers / eventLoopLagP99Ms /
+gcPauseMs / fsOpsTotal (exact, process-wide) / sampleWindowMs / sampleCount / idleSamples /
+processCpuMs.
 
-**idle 必须与 runtime 分开。** CPU profiler 会采样空闲时间，其节点 url 为空、
-functionName 为 `(idle)`（实测：空闲 3s 的 1716 个样本里 1715 个如此）。把空 url
-当 runtime 会让空闲主机看起来像 90% runtime 开销。因此：
-- `idle` 是独立 owner，不单列成插件行；
-- 每插件 `cpuShare` 以**活动样本**为分母（`sampleCount - idleSamples`），
-  否则空闲时间会把所有插件占比稀释到接近 0；
-- 面板全局条展示「活动样本 N/M」与「空闲 %」。
+**Idle must be kept apart from runtime.** The CPU profiler samples idle time as nodes with an empty
+URL and the function name `(idle)` (measured: 1715 of 1716 samples in an idle 3s window). Counting
+the empty URL as runtime would make an idle host look like 90% runtime cost. Therefore:
+- `idle` is its own owner and never a plugin row;
+- each plugin's `cpuShare` uses **active samples** (`sampleCount - idleSamples`) as the denominator,
+  or idle time would dilute every share towards 0;
+- the overview shows "active samples N/M" and "idle %".
 
-### 覆盖度规则（产品硬约束）
+Because active samples can be a small fraction on an idle host, a share can look large while the
+absolute cost is tiny. The panel therefore shows ms of CPU per second and "% of one core" next to
+every share ([design-overnight-analyzer.md §6.5](design-overnight-analyzer.md)).
 
-- 任何非精确指标在 UI 上必须带**视觉标记**，不能与精确指标混排成同一可信度。
-- 覆盖率低于阈值（默认 **60%**，可配）时，字节数列显示「≥ N（覆盖不足）」而非具体值。
-- 未归属（UNATTRIBUTED）占比超过阈值（默认 **15%**，可配）时看板顶部直接警告，不静默展示。
-- 面板顶部常驻一行说明当前采样模式、窗口长度与样本数。
+### Coverage rules (a hard product constraint)
+
+- Every inexact metric must carry a **visual marker** in the UI; it may not sit next to exact figures
+  looking equally trustworthy.
+- Below the coverage threshold (default **60%**) a byte column shows "≥ N (insufficient coverage)"
+  rather than a value.
+- When the unattributed share passes its threshold (default **15%**) the overview warns about it
+  instead of showing it quietly.
+- The panel always states the current sampling mode, window length and sample count.
 
 ---
 
-## 6. 采样状态机
+## 6. Sampling state machine
 
 ```
         +----------+  start   +-----------+  window elapsed  +----------+
@@ -292,173 +336,226 @@ functionName 为 `(idle)`（实测：空闲 3s 的 1716 个样本里 1715 个如
              |                  duty-cycle sleep                    |
              +------------------------------------------------------+
 
-  CONTINUOUS = IDLE 与 SAMPLING 之间无睡眠（idleMs = 0），由看板可见性驱动。
+  CONTINUOUS = no sleep between IDLE and SAMPLING (idleMs = 0).
 ```
 
-- Profiler.stop 在未启动时抛 ERR_INSPECTOR_COMMAND（证据 8）→ 状态显式维护，禁止盲目 stop。
-- 堆采样 profile 树随窗口增长 → 每窗口必须 stopSampling 释放，不允许无限累积。
-- 默认：CPU 采样间隔 **250µs** / 窗口 5s / 睡眠 30s；堆采样默认关闭，随「深度模式」开启。
-  250µs 是实测选定的：空闲 3s 窗口下 250µs 与 1000µs 的 CPU 开销相同（15 vs 16ms），
-  但时间分辨率高 4 倍；100µs 则跳到 126ms（8 倍），悬崖在 250µs 与 100µs 之间。
-- **空闲退避**：窗口空闲占比 ≥ 80% 时，把占空比睡眠拉长到 4 倍（上限 120s）。
-  空闲主机上几乎每个样本都是 idle，继续按原节奏采样只是白烧 CPU 与磁盘。
-  （依据：证据 8 唯一稳定趋势是「双采样同开最贵」，故默认只开 CPU。）
-- 连续模式：idleMs = 0、窗口默认 2s，上限 continuousMaxMs（默认 10 分钟）后自动退回。
-- 所有开关**立即生效**；插件卸载时无条件停止采样（cordis effect disposer）。
-- 状态机用 vitest fake timers + mock inspector session 全覆盖测试，
-  包括「stop 未启动的 session」「apply 中途失败」「重复 start」「连续模式超时退回」四条异常路径。
+- `Profiler.stop` throws `ERR_INSPECTOR_COMMAND` when nothing is recording (evidence 8), so the state
+  is tracked explicitly and stop is never called blindly.
+- The heap sampling tree grows with the window, so every window must call `stopSampling` to release
+  it; nothing may accumulate indefinitely.
+- Defaults: CPU sampling interval **250µs**, window 5s, sleep 30s; heap sampling off until deep mode
+  is turned on. 250µs was chosen by measurement: on an idle 3s window it costs the same as 1000µs
+  (15 vs 16ms of CPU) with four times the resolution, while 100µs jumps to 126ms (8×). The cliff is
+  between 250µs and 100µs. (On Windows the achieved interval floors at about 540µs regardless;
+  see design-overnight-analyzer.md §13.3.)
+- **Idle backoff:** when a window is at least 80% idle, the duty-cycle sleep stretches by 4× (up to
+  120s). On an idle host nearly every sample is idle, and keeping the cadence only burns CPU and
+  disk. (Basis: evidence 8's only stable trend is "both samplers together cost the most", so by
+  default only CPU sampling runs.)
+- **Sentinel probes:** during a long backoff, a coarse 10ms-interval probe runs for 1s every 10s and
+  triggers a real window as soon as it sees activity. Probes are never recorded
+  (design-overnight-analyzer.md §13.7).
+- Continuous mode: `idleMs = 0`, 2s windows, and an automatic fallback after `continuousMaxMs`
+  (10 minutes).
+- Background mode: 1000µs interval, 2s window, 120s sleep — a cheap always-on record.
+- Every switch **takes effect immediately**, and unloading the plugin stops sampling unconditionally
+  (cordis effect disposer).
+- The state machine is fully tested with vitest fake timers and a mock inspector session, including
+  four failure paths: stopping a session that never started, `apply` failing halfway, a repeated
+  start, and the continuous-mode timeout.
 
 ---
 
-## 7. 数据持久化（已定：默认落盘）
+## 7. Persistence (decided: on by default)
 
-**决策**：v1 默认落盘 JSONL（评审拍板），回答「哪个插件上周开始变差了」。
+**Decision:** v1 writes a JSONL log by default (settled in review), to answer "which plugin started
+getting worse last week".
 
-- 路径：$DSH_HOME/perf-lens/metrics-YYYYMMDD.jsonl，按天轮转。
-- 内容：**每窗口一行聚合快照**（global + 每插件指标行），
-  **原始 profile 树与调用帧永不落盘**（体积与隐私双重原因）。
-- 保留：默认 **14 天**，总量上限默认 **200 MB**，超出按天清理最旧文件。
-- 隐私：触碰文件的**具体路径默认不落盘**，只落读/写次数；
-  persistFilePaths: true 时才写路径（配置项，默认关）。
-- 写入纪律：单写者追加；perf-lens 自己的写盘会被 IoTracker 计到——
-  靠 self 帧剔除保证它不出现在归因里，SelfMonitor 单独展示自身开销。
-- 内存侧另保留短窗口环状缓冲（约最近 1 小时全分辨率），供 sparkline 与秒级刷新；
-  历史曲线走 JSONL 读取。
+- Path: `$DSH_HOME/perf-lens/metrics-YYYYMMDD.jsonl`, one file per UTC day.
+- Content: **one aggregated snapshot per window** (process row plus the plugin rows that did
+  something). **Raw profile trees and call frames are never written** (for size and privacy).
+  All-zero rows are not written either: they only restate the plugin inventory
+  (`ctx.loader.entries()` lists 200+ harness-internal packages as plugin rows). Measured: 214 of 220
+  rows were all zero, and writing them made each line about 46× larger (evidence 10).
+- Aggregation rule: **a row missing from a persisted window means zero activity in that window.**
+  The range `avgCpuShare` therefore averages over **every window in the range**, not only the windows
+  where the plugin appears — otherwise a plugin that spiked once would look like a constant consumer.
+- Retention: **14 days** and at most **200 MB** in total by default; beyond that the oldest day
+  files are deleted.
+- Privacy: only read/write **counts** are persisted. File paths are not collected at all.
+- Write discipline: a single appending writer. The lens's own writes are counted by the IoTracker,
+  but self-frame exclusion keeps them out of every plugin's attribution; they land on the `self` row.
+- In memory there is also a short ring buffer (about the last hour at full resolution) for the live
+  view.
+- Read path: `/stats` and `/trend` read through `HistoryStore.summaries`, an incremental cache that
+  parses each line once, then only the bytes appended since the last read, and keeps only the fields
+  the aggregators use. Day files that ended before the requested range are not opened. Before this,
+  every call re-parsed the whole log on the event loop (evidence 12).
 
 ---
 
-## 8. HTTP API 契约
+## 8. HTTP API
 
-| 路由 | 方法 | 内容 | 阶段 |
+| Route | Method | Content | Status |
 | --- | --- | --- | --- |
-| /api-perf/snapshot | GET | 当前窗口快照（global + plugins + unattributed 占比） | v1 |
-| /api-perf/control | POST | pause / resume / mode: continuous \| duty / deep / shallow，立即生效 | v1 |
-| /api-perf/history?plugin=&since= | GET | 时序查询（环状缓冲 + JSONL） | v1 |
-| /api-perf/stats?range=1h\|24h\|7d | GET | 范围聚合：每插件 avg/peak/p95/累计核时/覆盖率 | v1 |
-| /api-perf/trend?range=1h\|24h\|7d | GET | 趋势图专用**紧凑序列**：按桶平均降采样到 ≤120 点，每插件只留 cpuShare | v1 |
-| /api-perf/hotspots?plugin= | GET | 每插件热点函数 Top-N；仅深度模式、内存驻留 | v1 |
-| /api-perf/vitals | GET/POST | 前台卡顿上报与读取；POST body 校验后入内存环 | v1 |
-| /api-perf/export | GET | 报告导出（JSON / Markdown） | Phase 2 |
-| /api-perf/heap-snapshot | POST | 抓堆快照落盘，返回文件地址 | Phase 2 |
+| `/api-perf/snapshot` | GET | Current window (process row + plugin rows + unattributed/self shares + harness breakdown) | shipped |
+| `/api-perf/control` | POST | `{ action: 'pause' \| 'resume' }`, `{ mode: 'duty' \| 'continuous' \| 'background' }`, `{ deep: boolean }`; takes effect immediately | shipped |
+| `/api-perf/diagnostics` | GET | Sampler state, last error, owner rules and keys — for troubleshooting | shipped |
+| `/api-perf/history?plugin=&since=` | GET | Raw persisted windows (ring + JSONL) | shipped |
+| `/api-perf/stats?range=1h\|24h\|7d` | GET | Range aggregate per plugin: avg / peak / p95 / cumulative core-time / coverage | shipped |
+| `/api-perf/trend?range=1h\|24h\|7d` | GET | **Compact series** for the trend chart: bucket-averaged to ≤ 120 points, share and ms/s per plugin | shipped |
+| `/api-perf/hotspots?plugin=` | GET | A plugin's hot functions; deep mode only, in memory only | shipped |
+| `/api-perf/vitals` | GET / POST | Foreground jank reports; POST bodies are validated before entering an in-memory ring | shipped |
+| `/api-perf/export` | GET | Report export (JSON / Markdown) | planned (Phase 2) |
+| `/api-perf/heap-snapshot` | POST | Take a heap snapshot to disk and return its path | planned (Phase 2) |
 
-响应类型全部来自 src/shared/contract.ts，host 与 client 共享同一份定义。
+Every response type comes from `src/shared/contract.ts`, shared by host and client.
 
 ---
 
-## 9. 插件配置（schemastery Schema）
+## 9. Plugin configuration (planned)
 
-| 键 | 默认 | 说明 |
+No configuration schema is exported yet: the values below are constants in
+`src/shared/defaults.ts` (and, for history, `src/host/index.ts`). This is the planned schemastery
+schema.
+
+| Key | Default | Meaning |
 | --- | --- | --- |
-| cpuIntervalUs | 250 | CPU 采样间隔（实测 250µs 与 1000µs 同价、4 倍分辨率） |
-| windowMs | 5000 | 占空比单窗口长度 |
-| idleMs | 30000 | 占空比睡眠 |
-| continuousWindowMs | 2000 | 连续模式窗口长度 |
-| continuousMaxMs | 600000 | 连续模式自动退回上限 |
-| heapSampling | off | off \| deep，深度模式开双采样 |
-| history.persist | true | JSONL 落盘开关 |
-| history.retentionDays | 14 | 保留天数 |
-| history.maxBytes | 200MB | 总量上限 |
-| history.persistFilePaths | false | 是否落具体文件路径 |
-| idleBackoffThreshold | 0.8 | 空闲占比达到此值触发退避 |
-| idleBackoffFactor | 4 | 空闲退避的睡眠倍数 |
-| idleBackoffMaxMs | 120000 | 空闲退避的睡眠上限 |
-| coverageWarnThreshold | 0.6 | 覆盖度警示阈值 |
-| unattributedWarnThreshold | 0.15 | 未归属占比警告阈值 |
+| cpuIntervalUs | 250 | CPU sampling interval (250µs costs the same as 1000µs with 4× the resolution) |
+| windowMs | 5000 | Duty-cycle window length |
+| idleMs | 30000 | Duty-cycle sleep |
+| continuousWindowMs | 2000 | Continuous-mode window length |
+| continuousMaxMs | 600000 | Continuous mode falls back after this long |
+| heapSampling | off | off \| deep; deep mode turns on dual sampling |
+| history.persist | true | Write the JSONL log |
+| history.retentionDays | 14 | Days to keep |
+| history.maxBytes | 200MB | Total size cap |
+| idleBackoffThreshold | 0.8 | Idle share that triggers backoff |
+| idleBackoffFactor | 4 | Sleep multiplier during backoff |
+| idleBackoffMaxMs | 120000 | Longest backoff sleep |
+| coverageWarnThreshold | 0.6 | Coverage warning threshold |
+| unattributedWarnThreshold | 0.15 | Unattributed-share warning threshold |
+| estimateMinCoverage | 0.05 | Below this range coverage the ranking hides its whole-range estimate |
 
 ---
 
-## 10. 看板信息架构
+## 10. Dashboard layout
 
-### 10.1 主区看板（main 面板）
+### 10.1 Main panel
+
+Redrawn 2026-09 as cards: the harness theme's `--dsw-alias-*` tokens (the same source dsh-context
+uses), one stylesheet (`styles/panel.css`) inlined through tsdown's global-CSS channel, and a flat
+`pl-*` class namespace. The root is `height: 100%; overflow-y: auto`, so the whole page scrolls like
+the built-in panels. Still no chart library and no CSS toolchain (no minifier; a few KB of CSS is
+embedded as is).
 
 ```
-+-- Perf Lens -------------------------------------[duty] 2s窗口 样本412-+
-| RSS 680MB | heap 412MB | lag p99 12ms | GC 3ms | 自身开销 0.4%        |
-| [暂停] [深度模式] [导出]   未归属 6%（正常）                            |
-+------------------------------------------------------------------------+
-| 插件             CPU%   sparkline   存活堆    磁盘R/W    分配速率  覆盖度 |
-| v dsh-context    12.4   _/\~\_      88MB     980/210    2.1MB/s    98%  |
-|   dsh-chat-import 8.1   __/~\_      41MB     300/40     0.8MB/s    72% ! |
-|   harness 内核    31.2   /~~\~_     190MB    4.1k/1.2k  5.4MB/s    100% |
-|   运行时           9.0   _~__~_     --       --         --         --   |
-+------------------------------------------------------------------------+
-| [历史曲线：dsh-context 最近 24h  CPU% 与存活堆，双轴 SVG]                |
-+------------------------------------------------------------------------+
++-- Perf Lens [Intermittent] ------------ [Pause|Continuous|Background|Deep sampling] -+
+| Process overview: [RSS][Heap][Lag p99][GC][Window][Active samples][Idle]             |
+|                   sampled coverage · resolution · unattributed · this plugin's cost  |
++--------------------------------------------------------------------------------------+
+| Cost composition: CPU ====stacked bar==== | Memory ====stacked bar====               |
+|   top 5 plugins + other plugins + unattributed + own overhead + idle/unsampled       |
++--------------------------------------------------------------------------------------+
+| Foreground jank: ● smooth/janky  long tasks  frame gap p95  correlation ≠ causation  |
++--------------------------------------------------------------------------------------+
+| Top consumers: [up to 6 cards: name, current %, sparkline, core %, avg, peak, heap]  |
++--------------------------------------------------------------------------------------+
+| Trend: [Share|Absolute] [1h|24h|7d] ≤ 12 lines by peak, ≤ 8 legend chips, hover tip  |
++--------------------------------------------------------------------------------------+
+| Cumulative cost ranking: # plugin cumulative absolute avg p95 peak estimate          |
+|   top 10 with "show all"; idle plugins counted in a footnote                         |
++--------------------------------------------------------------------------------------+
+| Plugin detail: grouped table (sticky header, 52vh scroll, folds, hot-function rows)  |
++--------------------------------------------------------------------------------------+
 ```
 
-### 10.2 迷你视图（Phase 2 可选）
+Key rules: the composition bars answer "how much of the whole process is plugin X" (CPU normalised by
+active samples, heap by heapUsed, unattributed heap shown as its own segment, estimates never
+presented as exact); `self` / `unattributed` rows are merged with their bookkeeping fields so nothing
+is counted twice; the trend caps both lines and legend chips and counts what it left out in a
+footnote; the ranking lists only plugins with sampled CPU.
 
-右侧栏 sidebar.right.pane.tab 的常驻精简表格（无 sparkline、无控制区），
-点击经 ctx.layout.selectPanel(PANEL_ID) 跳到主区看板。v1 不做。
+### 10.2 Compact view (optional, Phase 2)
 
-### 交互规则
+An always-visible table in the right sidebar (`sidebar.right.pane.tab`) without sparklines or
+controls; clicking it opens the main panel through `ctx.layout.selectPanel(PANEL_ID)`. Not in v1.
 
-- 默认按 cpuShare 降序；可切换内存 / 磁盘 / 分配速率排序。
-- 覆盖度列对 < 100% 的项加警示样式，点击展开解释缺哪部分。
-- 连续模式开启时全局条显示连续模式徽标与剩余自动退回时间。
-- settings.section 完整分析页：Phase 2。
+### Interaction rules
+
+- Sorted by `cpuShare` descending by default; memory, disk and allocation rate are also sortable.
+- The coverage column marks anything under the threshold with a warning style and explains it on
+  hover.
+- The header chip names the active sampling mode (continuous mode is highlighted).
+- A full analysis page under `settings.section`: Phase 2.
 
 ---
 
-## 11. 风险清单
+## 11. Risks
 
-| 风险 | 影响 | 缓解 |
+| Risk | Impact | Mitigation |
 | --- | --- | --- |
-| 归因错配（依赖甩锅） | 看板指错人 | 强制祖先栈回溯；单测锁死 3.33 比值场景 |
-| 采样开销被低估 | 宿主变慢，用户卸载 | 占空比默认保守；SelfMonitor 自测量并展示；连续模式 10 分钟保险；一键全停 |
-| 连续模式被遗忘开着 | 长期 +15%~26% 开销 | continuousMaxMs 自动退回 + 全局条常驻模式徽标 |
-| 微基准数字被当作定值引用 | 设计决策建立在噪声上 | 只依据「两者同开最贵」这条稳定趋势；看板展示样本数与窗口长度 |
-| 假精度（字节数） | 用户据此优化错方向 | 覆盖度列 + 低覆盖时显示 ≥ N |
-| 堆快照撑爆内存 | 宿主 OOM | 落盘 + 离线解析，不在主进程 parse；限流（Phase 2） |
-| 打包/worker 边界 | 部分帧无法归属 | 归入 UNATTRIBUTED 并**显式展示占比**，超阈值警告 |
-| 与宿主 inspector 使用者冲突 | 调试端口占用 | 使用独立 inspector.Session，不依赖端口 |
-| 自采样放大 | 自身占据榜首 | self 路径硬剔除 + SelfMonitor 单列 |
-| JSONL 磁盘增长 | 占满 $DSH_HOME | 按天轮转 + 保留期 + 总量上限 + 单测覆盖清理逻辑 |
-| 落盘文件路径隐私 | 泄漏用户目录结构 | 默认只落计数；persistFilePaths 显式开启才写路径 |
+| Misattribution (blaming dependencies) | The dashboard points at the wrong plugin | Mandatory ancestor walk; the 3.33 ratio is locked by a unit test |
+| Sampling cost underestimated | The host slows down and users uninstall | Conservative duty cycle; the `self` row shows the lens's own cost; continuous mode capped at 10 minutes; one-click pause |
+| Continuous mode left on | A lasting +15% to +26% overhead | Automatic fallback after `continuousMaxMs`, and the mode chip is always visible |
+| Microbenchmark numbers quoted as facts | Design decisions built on noise | Rely only on the stable "both samplers cost most" trend; show sample count and window length |
+| False precision (bytes) | Users optimise the wrong thing | Coverage markers; "≥ N" when coverage is low |
+| Heap snapshots exhausting memory | Host OOM | Write to disk and parse in another process, never in the host; rate-limit (Phase 2) |
+| Bundling / worker boundaries | Some frames cannot be attributed | Counted as unattributed, **shown explicitly**, warned about past the threshold |
+| Clashing with other inspector users | Debug port conflicts | Uses its own `inspector.Session`; no port needed |
+| Self-sampling amplification | The lens tops its own ranking | Self paths excluded from every plugin and shown as their own row |
+| JSONL disk growth | Fills `$DSH_HOME` | Daily files, retention period, total size cap, unit-tested pruning |
+| File-path privacy | Leaks the user's directory layout | Only counts are persisted; paths are never collected |
+| Panel reads costing the host | The panel becomes a top consumer | Incremental history cache; refresh only after a new window is recorded (evidence 12) |
 
 ---
 
-## 12. 阶段范围
+## 12. Scope by phase
 
-### v1（本文档范围内）
+### v1 (this document)
 
-插件清单 + 全局指标 + 每插件 CPU 采样 + 存活堆采样（深度模式）+
-文件操作计数 + 定时器/监听器/句柄清单 + 目录字节扫描 +
-**任务管理器看板（sidebar.panellist 条目 + main 主区面板 + 连续采样模式 + sparkline）** +
-/api-perf/snapshot|control|history + **JSONL 落盘与历史曲线**。
+Plugin inventory, process metrics, per-plugin CPU sampling, retained-heap sampling (deep mode), file
+operation counts, **the dashboard (sidebar.panellist entry + main panel + continuous sampling +
+sparklines)**, `/api-perf/snapshot|control|history`, and **the JSONL log with history charts**.
+
+Still open from the v1 list: timer/listener/handle counts, the directory byte scan, `ctx.fs` byte
+wrapping and the SelfMonitor.
 
 ### Phase 2
 
-按需堆快照与离线解析 + 单插件详情（热点函数 / 分配点 / 触碰文件）+
-报告导出 + settings.section 完整分析页 + 基线对比（已知良好状态 diff）。
+On-demand heap snapshots with offline parsing, a per-plugin detail view (hot functions / allocation
+sites / files touched), report export, a full `settings.section` page, and baseline comparison (diff
+against a known-good state).
 
-### Phase 3（opt-in 实验性）
+### Phase 3 (opt-in, experimental)
 
-node:fs 加载钩子字节级磁盘 I/O + 子进程采样（dsh-subprocess-local / node-pty / LSP）+
-渲染进程指标。默认关闭，UI 标注实验性。**v1 明确不做子进程**。
+Byte-level disk I/O through a `node:fs` loader hook, child-process sampling (dsh-subprocess-local /
+node-pty / LSP) and renderer metrics. Off by default and labelled experimental. **v1 explicitly
+leaves child processes out.**
 
 ---
 
-## 13. 已决事项（原待决问题）
+## 13. Decisions (formerly open questions)
 
-| # | 原问题 | 结论 |
+| # | Question | Decision |
 | --- | --- | --- |
-| 1 | 历史留存策略 | **默认落盘 JSONL**（见 §7），隐私默认只落计数 |
-| 2 | 是否加 settings.section | Phase 2 再加；v1 看板走 sidebar.panellist + main（插件面板同构） |
-| 3 | 子进程是否纳入 v1 | **不纳入**，v1 只覆盖宿主进程内插件帧 |
-| 4 | 覆盖度 / 未归属阈值 | 默认 60% / 15%，均可配 |
-| 5 | 基线对比 | Phase 2 |
-| 6 | 实时看板形态 | **v1**：sidebar.panellist 条目 + main 主区看板 + 连续采样模式（见 §3） |
-| 7 | 面板注入位置 | **dsh 0.1.7 插件面板同构**：sidebar.panellist + main + ctx.layout.selectPanel（需 dsh ≥ 0.1.7-alpha.1） |
-| 8 | 积分口径 | 累计**采样窗口内**核时（cpuSelfMs 求和），并同时给出采样覆盖率；外推值必须标「估算」，不做无声外推 |
-| 9 | 前台卡顿归因 | 浏览器无法把 longtask 归因到插件 bundle，只呈现与 host CPU 的**时间相关性**，UI 常驻「相关性≠因果」 |
-| 10 | 热点函数持久化 | **永不落盘**（帧级数据，§7 红线）；仅内存驻留、仅深度模式、关闭即清空 |
-| 11 | 热点函数 sourcemap | 不做；实测 host 侧第三方包基本无 map，原始 functionName + file:line 已可用 |
-| 12 | 趋势图数据源 | **专用 /api-perf/trend 紧凑序列**，不复用 /api-perf/history：实测 24h 全量快照 31.5MB/次轮询，紧凑序列 119KB（259×），且按桶平均降采样保峰值 |
-| 13 | 面板布局 | 趋势图与积分榜置于插件表**上方**，插件表限高 48vh 滚动：真实宿主 200+ 插件，表格会把趋势顶到数千像素之下 |
-| 14 | 归并与分组 | host 把所有 `harness:*` owner **归并成单行 `harness`**（诊断 ownerKeys 仍留原始键）；面板分 `external / harness / runtime / self / other` 五组 |
-| 15 | 静态折叠 | 本窗口 cpu/heap/fs/alloc 全为 0 的行折叠为「静态 N 个」，按组可展开；这是**逐窗口判定**，不是永久标签 |
-| 16 | 后台采样档 | 新增 `SampleMode='background'`：1000µs 间隔 / 2s 窗口 / 120s 睡眠，低采样率常驻，面板关闭也在采集并落 JSONL |
-| 17 | sparkline 回填 | 面板挂载时用 `/api-perf/trend` 的最近 30 点回填序列；此前序列只活在组件 state 里，刷新即空 |
-| 18 | runtime 细分 | `runtime` 不再是一行：按 `runtime:gc` / `runtime:native` / `runtime:node` / `runtime:event-loop` 分列，残差留 `runtime`。依据 [证据 9](evidence.md#证据-9runtime-桶的构成必须细分)：该桶实测 19% GC、14% node 内部、若干原生帧 |
-
+| 1 | History retention | **JSONL on disk by default** (§7); only counts are persisted |
+| 2 | Add a `settings.section` page? | Phase 2; v1 uses sidebar.panellist + main, like the Plugins panel |
+| 3 | Child processes in v1? | **No**; v1 covers plugin frames inside the host process only |
+| 4 | Coverage / unattributed thresholds | 60% / 15% by default |
+| 5 | Baseline comparison | Phase 2 |
+| 6 | Live dashboard form | **v1**: sidebar.panellist entry + main dashboard + continuous sampling (§3) |
+| 7 | Panel location | **Same shape as the dsh 0.1.7 plugin panel**: sidebar.panellist + main + `ctx.layout.selectPanel` (needs dsh ≥ 0.1.7-alpha.1) |
+| 8 | What the ranking counts | Cumulative core-time **within sampled windows** (sum of `cpuSelfMs`), shown with the sampling coverage. Any extrapolation is labelled an estimate; nothing is scaled up silently |
+| 9 | Foreground jank attribution | The browser cannot attribute a long task to a plugin bundle, so the panel only shows its **time correlation** with host CPU and always says "correlation ≠ causation" |
+| 10 | Persisting hot functions | **Never** (frame-level data, the §7 red line); in memory only, deep mode only, cleared when deep mode is turned off |
+| 11 | Source maps for hot functions | Not done; host-side third-party packages ship almost no maps, and the raw `functionName` + `file:line` is already usable |
+| 12 | Trend data source | **A dedicated compact `/api-perf/trend`**, not `/api-perf/history`: 24h of full snapshots measured 31.5MB per poll against 119KB for the compact series (259×), and bucket averaging keeps peaks |
+| 13 | Panel layout | Trend and ranking sit **above** the plugin table, which scrolls inside 52vh: a real host has 200+ plugins and the table would push the trend thousands of pixels down |
+| 14 | Merging and grouping | The host merges every `harness:*` owner **into one `harness` row** (diagnostic `ownerKeys` keep the raw keys); the panel groups rows as `external / harness / runtime / self / other` |
+| 15 | Folding idle rows | Rows with zero CPU, heap, disk and allocation in the current window fold into "No cost this window N" per group. This is decided **per window**, not a permanent label |
+| 16 | Background profile | `SampleMode = 'background'`: 1000µs interval / 2s window / 120s sleep, a low-rate always-on record that keeps writing JSONL while the panel is closed |
+| 17 | Sparkline seeding | On mount the panel seeds each series with the last 30 points of `/api-perf/trend`; before, series lived only in component state and a reload cleared them |
+| 18 | Splitting runtime | `runtime` is no longer one row: `runtime:gc` / `runtime:native` / `runtime:node` / `runtime:event-loop`, with the remainder left in `runtime`. Basis: [evidence 9](evidence.md#evidence-9-the-runtime-bucket-must-be-split) — the bucket measured 19% GC, 14% Node internals and a tail of native frames |
+| 19 | History read path | `/stats` and `/trend` read through an incremental in-memory cache (`HistoryStore.summaries`) instead of re-parsing the log per call; the panel refetches only after a new window is recorded ([evidence 12](evidence.md#evidence-12-re-parsing-history-on-every-panel-refresh)) |
+| 20 | Ranking length and estimate | The ranking lists only plugins with sampled CPU, top 10 by default with "show all". The whole-range estimate is hidden below 5% sampling coverage (`estimateMinCoverage`), where it would be a 20× or larger scale-up |

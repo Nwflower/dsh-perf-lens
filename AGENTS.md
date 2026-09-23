@@ -1,47 +1,65 @@
 # AGENTS.md
 
-面向在本仓库工作的 AI Agent 与协作者。
+For AI agents and collaborators working in this repository.
 
-## 本仓库是什么
+## What this repository is
 
-`dsh-perf-lens` —— DeepSeek Harness 的插件资源开销分析面板。
-目的是把「排查性能问题时每次临时写脚本」变成常驻能力：回答**哪个插件在吃 CPU、吃内存、读写磁盘**。
+`dsh-perf-lens` — a DeepSeek Harness plugin that shows which plugin is using the host's CPU, memory
+and disk. It replaces "write a throwaway profiling script every time something is slow" with a
+permanent panel in the web GUI.
 
-当前处于**Phase 1 MVP 已实现**阶段：host 采样链路（归因 / 采样器 / IoTracker / 全局指标 / JSONL / 路由）与
-sidebar.panellist + main 任务管理器面板均已落地，57 项单测与四项门禁全绿；剩余收尾项见 README 状态。
+Phase 1 and Phase 2 have shipped and the package is being prepared for its first release (0.1.0):
+the host sampling pipeline (attribution / sampler / IoTracker / process metrics / JSONL history /
+routes) and the dashboard (sidebar.panellist entry + main panel) are in place, with the four gates
+(test / typecheck / lint / build) green. What each release contains is in `CHANGELOG.md`; what is
+still open is in `docs/design.md` §12.
 
-## 硬约束（来自调研结论，实现时不得违背）
+## Hard constraints (from research findings; must not be violated when implementing)
 
-1. **归因必须做祖先栈回溯。** 沿 CPU profile / 堆采样树的父指针上溯到最近的插件栈帧，
-   绝不能按「函数定义在哪个文件」归属。后者实测会把 573/574 的样本丢进无法归属的桶。
-   详见 `docs/evidence.md` 证据 5。
-2. **不得 monkey-patch `node:fs` 并声称测到了磁盘 I/O。** ESM 命名导入的绑定在实例化时快照，
-   补丁会被静默绕过，产出系统性偏低的假数据。详见 `docs/evidence.md` 证据 3。
-3. **不得常开双采样。** 纯计算负载实测 +15% ~ +26%（两次运行）。必须占空比轮转 + 按需深度采样 + 剔除自身帧。
-4. **非精确指标必须带覆盖度标记。** 尤其是磁盘字节数。宁可显示「≥ N（覆盖不足）」，
-   也不要把估算值当精确值展示。这是本方案最大的产品风险。
-5. **`Profiler.stop` 必须严格配对。** 空转调用抛 `ERR_INSPECTOR_COMMAND`，状态机需显式维护。
-6. **插件卸载时必须无条件停止采样**（走 cordis effect disposer），不能留下后台采样。
+1. **Attribution must walk the ancestor stack.** Follow the parent pointers of the CPU profile / heap
+   sampling tree up to the nearest plugin stack frame; never attribute by "which file the function is
+   defined in". The latter was measured to dump 573/574 samples into an unattributable bucket.
+   See `docs/evidence.md` evidence 5.
+2. **Do not monkey-patch `node:fs` and claim to have measured disk I/O.** ESM named-import bindings are
+   snapshotted at instantiation, so the patch is silently bypassed, producing systematically low fake
+   data. See `docs/evidence.md` evidence 3.
+3. **Never leave dual sampling permanently on.** Measured +15% ~ +26% on a pure compute workload (two
+   runs). Must use duty-cycle rotation + on-demand deep sampling + self-frame exclusion.
+4. **Inexact metrics must carry a coverage marker.** Especially disk bytes. Better to display
+   "≥ N (insufficient coverage)" than to present an estimate as an exact value. This is the biggest
+   product risk of this approach.
+5. **`Profiler.stop` must be strictly paired.** A no-op call throws `ERR_INSPECTOR_COMMAND`; the state
+   machine must maintain this explicitly.
+6. **Sampling must stop unconditionally when the plugin unloads** (via the cordis effect disposer); no
+   background sampling may be left running.
 
-## 文档纪律
+## Documentation discipline
 
-- `docs/feasibility.md` 是可行性的单一事实来源；结论变化时同步更新它，不要在别处复述。
-- `docs/evidence.md` 记录**原始观测输出**。任何新的机制性结论都必须附可复现证据。
-- `docs/design.md` 是已定稿的架构设计；架构级变更需先改它并更新「已决事项」表。
-- 探针脚本是一次性证据，不是产品代码；实现时把关键路径转成正式单测后，
-  可考虑归档 `probes/` 而非继续扩展它。
+- `docs/feasibility.md` is the single source of truth for feasibility; update it when conclusions
+  change, and do not restate them elsewhere.
+- `docs/evidence.md` records **raw observed output**. Any new mechanistic conclusion must come with
+  reproducible evidence.
+- `docs/design.md` is the finalized architecture design; architecture-level changes must update it
+  first, along with the decisions table (§13).
+- `CHANGELOG.md` records user-visible changes; add to the unreleased section as features land.
+- Probe scripts are one-off evidence, not product code; once key paths have been converted into proper
+  unit tests during implementation, consider archiving `probes/` rather than extending it further.
 
-## 语言
+## Language
 
-- 文档用中文（面向本仓库作者）。
-- 代码注释、commit message 用英文。
+- Documentation, code comments and commit messages are in English.
+- Probe output quoted in `docs/` stays verbatim, even where a probe prints Chinese labels.
+- User-facing panel strings are bilingual and live only in `src/client/i18n.ts`.
 
-## 临时文件
+## Temporary files
 
-临时文件放系统临时目录或本仓库 `.tmp/`（已 gitignore），用完即删。
+Temporary files go in the system temp directory or this repo's `.tmp/` (gitignored); delete them once
+they are no longer needed.
 
-## 相关仓库
+## Related repositories
 
-- `D:\Build\deepseek-harness` —— DSH 源码（判断机制的唯一依据，不要凭假设）
-- `D:\Build\dsh-chat-import` —— 外部插件范式参考：host 路由注册、client 单文件 bundle、槽位注册
-- `D:\Build\dsh-context` —— 另一个外部插件；其 `.tmp/probe/` 是本文档要取代的临时脚本方法学来源
+- `D:\Build\deepseek-harness` — DSH source (the only authority for mechanism questions; do not guess)
+- `D:\Build\dsh-chat-import` — external plugin paradigm reference: host route registration, client
+  single-file bundle, slot registration
+- `D:\Build\dsh-context` — another external plugin; its `.tmp/probe/` is the source of the throwaway
+  probe-script methodology that this project replaces

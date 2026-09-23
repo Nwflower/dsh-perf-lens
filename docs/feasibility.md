@@ -1,54 +1,62 @@
-# DSH 插件性能分析面板 — 可行性分析
+# Feasibility: a plugin performance panel for DSH
 
-> 调研日期：2026-09（环境：Windows / Node v24.18.0 / @deepseek-ai/dsh 0.1.7-alpha.1 与 0.1.5-rc.2）
-> 状态：**结论已确认，尚未实现**。所有机制性结论均有实测证据，见 [evidence.md](evidence.md)。
-
----
-
-## 1. 结论
-
-**可行，但必须接受一条硬边界**：DSH 宿主是**单进程**，不存在「每插件 RSS」这种 OS 级真相。
-
-可行的路径是**进程内采样归因**：
-
-1. 用 `node:inspector` 采样 CPU 与堆分配，把样本**沿调用栈回溯到最近的插件栈帧**；
-2. 用 `async_hooks` **零补丁**统计每个插件的文件操作次数；
-3. 用 `ctx.loader.entries()` 建立「模块路径 → 插件」映射表；
-4. 通过 Web GUI 右侧栏 tab 展示。
-
-CPU、内存分配/存活、文件操作次数、插件清单、面板 UI —— 全部有可靠落点。
-
-**唯一实质性妥协是「每插件磁盘字节数」**：操作次数可精确归因，字节数无法在不做侵入式拦截的前提下精确获取。
-详见 [§6 能力边界](#6-能力边界必须标注在-ui-上)。
+> Researched: 2026-09 (Windows / Node v24.18.0 / @deepseek-ai/dsh 0.1.7-alpha.1 and 0.1.5-rc.2)
+> Status: **confirmed and implemented** (Phase 1 and Phase 2 have shipped; see the README changelog).
+> Every mechanism below is backed by measured output in [evidence.md](evidence.md).
 
 ---
 
-## 2. 运行时事实（已核实）
+## 1. Conclusion
 
-| 项 | 实测值 |
+**Feasible, with one hard limit.** The DSH host is a **single process**, so there is no
+operating-system truth such as "RSS per plugin".
+
+What works is **in-process sampling attribution**:
+
+1. Sample CPU and heap allocation with `node:inspector`, and walk each sample **up the call
+   stack to the nearest plugin frame**.
+2. Count each plugin's file operations with `async_hooks`, **without patching anything**.
+3. Build a "module path → plugin" map from `ctx.loader.entries()`.
+4. Show the result in the Web GUI.
+
+CPU, memory allocation and retention, file operation counts, the plugin inventory and the panel UI
+all have a reliable mechanism behind them.
+
+**The one real compromise is per-plugin disk bytes.** Operation counts can be attributed exactly;
+byte counts cannot be measured exactly without intrusive interception. See
+[§6 Limits](#6-limits-the-ui-must-state-them).
+
+---
+
+## 2. Runtime facts (verified)
+
+| Item | Observed |
 | --- | --- |
-| 当前 GUI 宿主 | PID 28108，`node .../@deepseek-ai/dsh/lib/bin.js web --port 3081` —— **纯 Node 进程**，非 Electron |
-| Node 版本 | v24.18.0 |
-| 宿主 RSS | ~680 MB（单进程承载全部 host 插件） |
-| 已装插件 | `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`：`dsh-base`、`dsh-web-app` + 13 个第三方 bundle |
-| 插件可枚举 | `ctx.loader.entries()`，harness 自身的 `@deepseek-ai/dsh-plugin-inventory` 即 `inject = ['loader']`，可拿到 `moduleName` / `entryId` / fiber 状态 / 解析基准 `baseUrl` |
-| 插件产物形态 | 各插件自带打包好的 `lib/index.mjs`（host）与 `lib/client.js`（client 单文件 bundle），模块 URL 与插件一一对应，归因干净 |
+| GUI host | PID 28108, `node .../@deepseek-ai/dsh/lib/bin.js web --port 3081` — a **plain Node process**, not Electron |
+| Node version | v24.18.0 |
+| Host RSS | ~680 MB (one process carries every host plugin) |
+| Installed plugins | `dsh.profile.bundles` in `~/.dsh/profiles/web/package.json`: `dsh-base`, `dsh-web-app` and 13 third-party bundles |
+| Plugins are enumerable | `ctx.loader.entries()`. The harness's own `@deepseek-ai/dsh-plugin-inventory` does exactly this with `inject = ['loader']`, and gets `moduleName`, `entryId`, fiber state and the resolution anchor `baseUrl` |
+| Build output | Each plugin ships its own bundled `lib/index.mjs` (host) and `lib/client.js` (single-file client bundle), so module URLs map one-to-one onto plugins and attribution stays clean |
 
-因为宿主是纯 Node，`node:inspector`、`v8`、`async_hooks`、`process.resourceUsage()` 全部可用，
-且**不需要 `--inspect` 端口**（同进程 `new inspector.Session()` 即可）。
+Because the host is plain Node, `node:inspector`, `v8`, `async_hooks` and `process.resourceUsage()`
+are all available, and **no `--inspect` port is needed**: an in-process `new inspector.Session()` is
+enough.
 
-> 补充：DSH Desktop（Electron）形态下 host 跑在 Electron 主进程，上述 API 同样可用。结论对两种形态都成立。
+> DSH Desktop (Electron) runs the host in the Electron main process, where the same APIs exist. The
+> conclusions hold for both.
 
 ---
 
-## 3. 逐项机制的实测验证
+## 3. Mechanism by mechanism
 
-### 3.1 CPU 归因 —— 成立
+### 3.1 CPU attribution — works
 
-`inspector.Session` → `Profiler.enable` / `start` / `stop` 返回 Chrome CPU profile：
-`nodes[].callFrame.url` + `nodes[].children` + `samples[]` 打点。
+`inspector.Session` → `Profiler.enable` / `start` / `stop` returns a Chrome CPU profile:
+`nodes[].callFrame.url`, `nodes[].children` and the `samples[]` ticks.
 
-按 url 前缀映射到插件即可得到每插件 CPU 占比。实测能正确区分模块：
+Mapping URLs to plugins by prefix gives each plugin's CPU share. The profile separates modules
+correctly:
 
 ```
 CPU self-time by frame url:
@@ -57,25 +65,29 @@ CPU self-time by frame url:
       1  node:inspector
 ```
 
-### 3.2 内存归因 —— 成立（两种粒度）
+### 3.2 Memory attribution — works, at two levels of detail
 
-- **分配 / 存活采样**：`HeapProfiler.startSampling` / `stopSampling` 返回带 `callFrame` 的树，节点带 `selfSize`。
-  `stopSampling` 返回的是**停止时仍存活**的采样对象 → 这本身就是「按分配点的存活字节」信号，
-  比单纯的分配速率更有诊断价值（能区分「一直在分配但被回收」和「真的泄漏/常驻」）。
-- **精确 retained size**：`v8.writeHeapSnapshot()` 存在，可落盘后离线解析（`HeapProfiler.takeHeapSnapshot` 亦可）。
-- **全局指标**：`v8.getHeapStatistics()`、`process.memoryUsage()`、
-  `process.report.getReport()`（含 `rss` / `maxRss` / `pageFaults` / `cpuConsumptionPercent`）。
+- **Allocation and retention sampling:** `HeapProfiler.startSampling` / `stopSampling` return a tree
+  with `callFrame`s whose nodes carry `selfSize`. `stopSampling` reports the sampled objects that are
+  **still alive when sampling stops**, which is already a "retained bytes by allocation site" signal.
+  That is more useful than a raw allocation rate: it tells "allocates a lot but frees it" apart from
+  "actually leaks or stays resident".
+- **Exact retained size:** `v8.writeHeapSnapshot()` exists and can be parsed offline (so can
+  `HeapProfiler.takeHeapSnapshot`).
+- **Process totals:** `v8.getHeapStatistics()`, `process.memoryUsage()` and
+  `process.report.getReport()` (with `rss`, `maxRss`, `pageFaults`, `cpuConsumptionPercent`).
 
-实测堆采样按 url 聚合输出：
+Heap sampling aggregated by URL:
 
 ```
 Allocation self-size by frame url (bytes):
        4144  /D:/Build/Temp/feas-inspector.mjs
 ```
 
-### 3.3 决定性实验：归因必须做「祖先栈回溯」
+### 3.3 The deciding experiment: attribution must walk the ancestor stack
 
-构造两个假插件共用一个共享依赖模块，分别调用 200 次 / 60 次，对比两种归因策略：
+Two fake plugins share one dependency module and call it 200 and 60 times. Two attribution
+strategies compared:
 
 ```
 direct (self-frame) attribution:      ancestor-walk attribution:
@@ -84,33 +96,37 @@ direct (self-frame) attribution:      ancestor-walk attribution:
                                           2  (unattributed)
 ```
 
-- **按栈帧自身归属**：574 个样本里 573 个落进「共享依赖」这个无法归属的桶，归因基本失效。
-- **沿父节点回溯到最近的插件栈帧**：得到 441 : 131 = 3.37，真实比 200 : 60 = 3.33，误差 < 1.5%。
+- **Attributing by the frame itself:** 573 of 574 samples land in the "shared dependency" bucket,
+  which belongs to nobody. Attribution effectively fails.
+- **Walking up parent nodes to the nearest plugin frame:** 441 : 131 = 3.37 against a true ratio of
+  200 : 60 = 3.33, an error under 1.5%.
 
-> **这是整个方案的核心设计点。** 归因算法必须是「栈回溯到最近插件帧」，而不是「看这个函数定义在哪个文件里」。
-> 它顺带解决了「插件依赖的 node_modules 该算谁的」这个问题——**算调用方插件的**。
-> 否则任何带依赖的插件（如 `dsh-chat-import` 依赖 `fzstd`）都会把自己的成本甩给依赖。
+> **This is the core design point of the whole approach.** Attribution must walk the stack to the
+> nearest plugin frame, not ask which file a function is defined in. It also settles who pays for a
+> plugin's `node_modules`: **the calling plugin does**. Otherwise any plugin with dependencies (for
+> example `dsh-chat-import`, which depends on `fzstd`) would pass its cost on to them.
 
-### 3.4 磁盘 I/O —— 分三层，能力递减
+### 3.4 Disk I/O — three layers, each weaker than the last
 
-#### 第一层：进程级操作次数（精确、零依赖）
+#### Layer 1: process-wide operation counts (exact, no dependencies)
 
-`process.resourceUsage().fsRead / fsWrite` 在 Windows 上给出**精确的进程级读写操作次数**。实测：
+On Windows, `process.resourceUsage().fsRead / fsWrite` gives **exact process-wide read and write
+operation counts**:
 
 ```
 resourceUsage before: {"fsRead":1,"fsWrite":0}
 resourceUsage after : {"fsRead":21,"fsWrite":20}
-delta fsRead: 20  delta fsWrite: 20     ← 正好对应 20 次写 + 20 次读
+delta fsRead: 20  delta fsWrite: 20     ← exactly the 20 writes + 20 reads
 ```
 
-`process.report.getReport().resourceUsage.fsActivity.{reads,writes}` 是同源数据，另外附带
-`rss` / `maxRss` / `pageFaults` / `cpuConsumptionPercent`。
+`process.report.getReport().resourceUsage.fsActivity.{reads,writes}` is the same data, plus `rss`,
+`maxRss`, `pageFaults` and `cpuConsumptionPercent`.
 
-**注意：这是操作次数，不是字节数。**
+**These are operation counts, not bytes.**
 
-#### 第二层：按插件的操作次数（精确、零补丁）
+#### Layer 2: per-plugin operation counts (exact, no patching)
 
-`async_hooks` 的 `init(asyncId, type)` + `AsyncLocalStorage` 标记「当前插件」。实测：
+`async_hooks` `init(asyncId, type)` plus an `AsyncLocalStorage` marking the current plugin:
 
 ```
 per-owner fs async-resource counts:
@@ -120,61 +136,67 @@ per-owner fs async-resource counts:
     4  pluginB :: FSREQPROMISE
 ```
 
-**无需任何 monkey-patch** 即可按插件统计异步文件操作。
+Asynchronous file operations can be counted per plugin **with no monkey-patching at all**.
 
-局限：`readFileSync` / `writeFileSync` **不产生异步资源，不计入**——这部分改由 CPU 采样中
-`node:fs` 帧的祖先回溯覆盖（次数近似，但归属正确）。
+Limit: `readFileSync` / `writeFileSync` **create no async resource and are not counted**. They are
+covered instead by walking the ancestors of `node:fs` frames in the CPU profile (approximate counts,
+correct ownership).
 
-#### 第三层：字节级（需要拦截，代价高）
+#### Layer 3: bytes (needs interception, costly)
 
-必须拦截调用点。这里有一个**必须避开的静默错误陷阱**——实测 ESM 内置模块的可补丁性：
+Bytes require intercepting the call sites, and there is a **silent failure trap** here. Patchability
+of an ESM built-in, measured:
 
 ```
 fs.readFileSync 被替换后 → ns readFileSync patched? true
 命名导入是否看到补丁？      → named-import saw patch: NO
 ```
 
-`import { readFileSync } from 'node:fs'` 的绑定在模块实例化时快照，
-**运行时 monkey-patch `fs` 会被 ESM 命名导入静默绕过**。
+(The two labels read "after replacing fs.readFileSync" and "does the named import see the patch?".)
 
-> 这意味着「补丁 fs 模块」这条路只能覆盖 CJS 调用点与默认导入的属性访问，
-> 对插件主流的 ESM 命名导入**完全无效**。如果不知道这一点，
-> 做出来的工具会给出**看起来正常但系统性偏低**的数据——比报错更危险。
+The binding in `import { readFileSync } from 'node:fs'` is captured when the module is instantiated,
+so **a runtime monkey-patch of `fs` is silently bypassed by ESM named imports**.
 
-字节级精确只有两条真路：
+> Patching the `fs` module therefore only reaches CommonJS call sites and property access on the
+> default import, and **does nothing** for the ESM named imports most plugins use. A tool built
+> without knowing this reports data that **looks normal but is systematically low** — more dangerous
+> than an error.
 
-| 方案 | 覆盖 | 风险 |
+There are only two real routes to exact bytes:
+
+| Approach | Coverage | Risk |
 | --- | --- | --- |
-| 包装 `ctx.fs` 服务（`@deepseek-ai/dsh-fs` 的 `FileSystem` 抽象基类） | 仅走 harness 的 I/O | 低，但覆盖不全 |
-| `module.register()` 加载钩子重写 `node:fs` 说明符 | 我们加载之后导入的模块 | 改变函数标识，与 `graceful-fs` 等自补丁库冲突；插件加载顺序敏感 |
+| Wrap the `ctx.fs` service (the `FileSystem` base class in `@deepseek-ai/dsh-fs`) | Only I/O that goes through the harness | Low, but incomplete |
+| A `module.register()` loader hook that rewrites the `node:fs` specifier | Modules imported after ours | Changes function identity, conflicts with self-patching libraries such as `graceful-fs`, and depends on plugin load order |
 
-**建议**：v1 不做字节级拦截；用 `ctx.fs` 包装拿到「harness 中介 I/O」的精确字节，
-其余标注为未覆盖。字节级加载钩子留作 Phase 3 的 opt-in 深度模式。
+**Recommendation:** no byte-level interception in v1. Wrap `ctx.fs` to get exact bytes for
+harness-mediated I/O and mark the rest as uncovered. Keep the loader hook as an opt-in deep mode for
+Phase 3.
 
-### 3.5 其余可用信号
+### 3.5 Other available signals
 
-| 信号 | 机制 |
+| Signal | Mechanism |
 | --- | --- |
-| 每插件定时器 / 监听器 / 打开句柄 | 包装 `ctx.setInterval` / `ctx.setTimeout` / `ctx.on`，或按 fiber 归属统计 |
-| 事件循环延迟 | `perf_hooks.monitorEventLoopDelay()` |
-| GC 停顿 | `PerformanceObserver` 的 `gc` entry |
-| 每插件磁盘占用（字节，精确） | 扫描 `$DSH_HOME/**` 与工作区目录，按「路径 → 归属插件」映射 |
-| 插件生命周期 | fiber phase、加载顺序、HMR 重载次数 |
-| 当前 CDP 端口 | 如需外部调试可另开，但本方案不需要 |
+| Per-plugin timers, listeners, open handles | Wrap `ctx.setInterval` / `ctx.setTimeout` / `ctx.on`, or count by fiber ownership |
+| Event-loop delay | `perf_hooks.monitorEventLoopDelay()` |
+| GC pauses | `gc` entries from `PerformanceObserver` |
+| Per-plugin disk footprint (exact bytes) | Scan `$DSH_HOME/**` and workspace directories with a "path → owning plugin" map |
+| Plugin lifecycle | Fiber phase, load order, HMR reload count |
+| CDP port | Can be opened for external debugging, but this approach does not need one |
 
 ---
 
-## 4. 开销实测（决定默认策略）
+## 4. Measured overhead (sets the default strategy)
 
-| 场景 | CPU profiler 1000µs | 堆采样 32KB | 两者同开 |
+| Workload | CPU profiler at 1000µs | Heap sampling at 32KB | Both together |
 | --- | --- | --- | --- |
-| 纯计算微基准 | +7% ~ +23% | ~0%（噪声内） | **+15% ~ +26%** |
-| 异步 + 文件 I/O 混合 | ~0%（可负） | ~0%（可负） | ~0% ~ +12% |
+| Pure compute microbenchmark | +7% to +23% | ~0% (within noise) | **+15% to +26%** |
+| Mixed async + file I/O | ~0% (can be negative) | ~0% (can be negative) | ~0% to +12% |
 
-原始数据：
+Raw output:
 
 ```
---- compute-bound ---                      第一次运行
+--- compute-bound ---                      first run
 baseline                            8 ms
 CPU profiler 1000us                 9 ms
 heap sampling 32KB                  8 ms
@@ -189,31 +211,36 @@ both                               79 ms
   overhead: cpu +-0.5%  heap +-4.4%  both +12.4%
 ```
 
-第二次运行同脚本，纯计算负载上 `both` 达到 **+25.8%**，异步混合负载则全部落在噪声内。
+A second run of the same script put `both` at **+25.8%** on the compute workload; the mixed async
+workload stayed within noise.
 
-**读数须知**：这是微基准，绝对百分比波动大（异步 + I/O 负载甚至出现负值，
-因为 I/O 等待时间淹没了采样开销）。可稳定复现的只有一条趋势：
-**纯计算负载上「两者同开」始终是最贵的一档**。设计决策应基于这条趋势，而非某个具体数字。
+**How to read this:** these are microbenchmarks and the absolute percentages swing a lot (the
+async + I/O workload even goes negative, because I/O waits swamp the sampling cost). Only one trend
+reproduces reliably: **on a compute workload, running both samplers is always the most expensive
+option**. Design decisions should rest on that trend, not on any single number.
 
-**结论**：不能常开「双采样」。设计上必须：
+**Consequence:** dual sampling cannot stay on. The design must have:
 
-- 占空比轮转（如 5s 采样 / 30s 停止）；
-- 按需深度采样（用户点「开始剖析」才开双采样）；
-- 随时可停；
-- **排除自身帧**（`dsh-perf-lens` 自己的模块路径必须从归因中剔除，否则会自我放大）。
+- duty-cycle rotation (for example sample 5s, pause 30s);
+- deep sampling on demand (dual sampling only when the user asks for it);
+- a way to stop at any time;
+- **self-frame exclusion** (dsh-perf-lens's own module paths must be removed from attribution, or
+  the tool amplifies itself).
 
-另注：`Profiler.stop` 在未启动时会抛 `Inspector error -32000: No recording profiles found`，
-状态机必须严格维护 start/stop 配对。
+Also: calling `Profiler.stop` when nothing is recording throws
+`Inspector error -32000: No recording profiles found`, so the state machine must keep start/stop
+strictly paired.
 
 ---
 
-## 5. 面板与集成路径（全部有现成范式）
+## 5. Panel and integration (every piece has an existing pattern)
 
-### 5.1 Host 侧
+### 5.1 Host side
 
-ESM 插件，导出 `name` / `inject` / `apply`。
+An ESM plugin exporting `name` / `inject` / `apply`.
 
-`webServer` 是**可选且晚挂载**的 host 服务，必须走延迟注入，不能进 `inject` 数组（否则 headless profile 下整个插件无法激活）：
+`webServer` is an **optional, late-mounted** host service. It has to be injected lazily and must not
+go in the `inject` array, or the whole plugin fails to activate in a headless profile:
 
 ```js
 ctx.inject(['webServer'], (webCtx) => {
@@ -221,34 +248,39 @@ ctx.inject(['webServer'], (webCtx) => {
 })
 ```
 
-路由 API：`ws.register({ kind: 'exact' | 'prefix', path, handler }): () => void`。
+Route API: `ws.register({ kind: 'exact' | 'prefix', path, handler }): () => void`.
 
-这与 `dsh-chat-import` 的 `/api-import/*` 完全同构，可直接照搬。
+This is the same shape as `/api-import/*` in `dsh-chat-import` and can be copied directly.
 
-### 5.2 Client 侧
+### 5.2 Client side
 
-- 单文件 `lib/client.js`，经 `window.__ModuleLoader__.load({ id, factory })` 加载；
-- `package.json` 声明 `dsh.client.inject` 与 `dsh.client.platform = "web"`；
-- factory 内可 `require("react")`、`require("react-dom")`、`require("@deepseek-ai/dsh-client-ui-primitives")`；
-- 槽位注册：`ctx.slots.inject(slotName, () => ctx.slots.register(...))`。
+- A single `lib/client.js`, loaded through `window.__ModuleLoader__.load({ id, factory })`.
+- `package.json` declares `dsh.client.inject` and `dsh.client.platform = "web"`.
+- Inside the factory, `require("react")`, `require("react-dom")` and
+  `require("@deepseek-ai/dsh-client-ui-primitives")` are available.
+- Slot registration: `ctx.slots.inject(slotName, () => ctx.slots.register(...))`.
 
-**已确认的面板落点（本仓库决策）**：`sidebar.right.pane.tab`（右侧栏 tab）。
+**Panel location:** this study proposed a right-sidebar tab (`sidebar.right.pane.tab`). The
+implementation settled on a `sidebar.panellist` entry that opens a full main-column panel instead;
+see [design.md §3.1](design.md#31-where-the-panel-lives).
 
-可用的相关槽位：
+Relevant slots:
 
-| 槽位 | 用途 |
+| Slot | Use |
 | --- | --- |
-| `sidebar.right.pane.tab` | **本方案采用**：常驻右侧栏，随时瞄一眼 |
-| `settings.section` | 设置页分区，适合放完整分析（Phase 2 可加） |
-| `sidebar.footer.action` | 底部动作按钮 |
+| `sidebar.panellist` + `main` | **Used**: a left-nav entry that opens the full dashboard |
+| `sidebar.right.pane.tab` | Always-visible right sidebar; kept as an option for a compact view |
+| `settings.section` | A settings-page section, suited to a full analysis page |
+| `sidebar.footer.action` | A footer action button |
 
-> 客户端 bundle 约束：DSH 的客户端模块加载器没有相对 `require`、也没有资源 URL，
-> 插件浏览器侧产物必须是**单个自包含文件**。源码可以分片，但需要构建脚本拼回单文件
-> （`dsh-chat-import` 的 `scripts/build-client.mjs` 是这个模式的参考实现）。
+> Client bundle constraint: the DSH client module loader has no relative `require` and no asset
+> URLs, so a plugin's browser output must be **one self-contained file**. Source can be split, but
+> the build has to join it back into a single file (`scripts/build-client.mjs` in `dsh-chat-import`
+> is the reference implementation).
 
-### 5.3 分发
+### 5.3 Distribution
 
-`cordis.patch.yml` 插入一行：
+One row in `cordis.patch.yml`:
 
 ```yaml
 - insert:
@@ -258,64 +290,73 @@ ctx.inject(['webServer'], (webCtx) => {
 
 ---
 
-## 6. 能力边界（必须标注在 UI 上）
+## 6. Limits (the UI must state them)
 
-以下几点建议直接做进面板的「覆盖度 / 置信度」列。**否则工具会变成新的误导源**——
-这是本方案最大的产品风险，不是技术风险。
+These belong in the panel's coverage / confidence markers. **Otherwise the tool becomes a new source
+of misleading numbers** — the biggest product risk of this approach, larger than any technical risk.
 
-1. **没有每插件 RSS。** 只有全局 RSS + 每插件**采样归因**的存活堆字节。两者量纲不同，不能相加对齐。
-2. **每插件磁盘字节数不精确。** 操作次数可精确归因；字节数只有 `ctx.fs` 覆盖范围内的部分，
-   其余必须标注为「未覆盖」。
-3. **客户端（浏览器）内存无法归因。** 那是另一个进程，只能给全局渲染进程指标。
-4. **子进程不在内。** `dsh-subprocess-local/runner.js`、node-pty、LSP server 都是独立 PID，
-   v1 只覆盖宿主进程内的插件帧；这些进程的开销只能靠进程级采样另算。
-5. **采样即统计。** 短窗口噪声大，面板必须显式展示采样窗口长度与样本数。
-
----
-
-## 7. 生态调研
-
-`dsh-plugin` topic 下**没有同类插件**：
-
-- `dsh-plugin-bench` 是**静态质量评分**（八维度 scorecard），不测运行时开销；
-- 各类 usage meter / cost meter 统计的是**模型成本**，不是插件资源占用。
-
-这是一个空位。
+1. **There is no per-plugin RSS.** Only process RSS plus each plugin's **sampled** retained heap
+   bytes. The two are different quantities and cannot be added up against each other.
+2. **Per-plugin disk bytes are not exact.** Operation counts are attributed exactly; bytes exist only
+   for what `ctx.fs` covers, and the rest must be marked uncovered.
+3. **Browser memory cannot be attributed.** It lives in another process; only renderer-wide figures
+   are available.
+4. **Child processes are out of scope.** `dsh-subprocess-local/runner.js`, node-pty and LSP servers
+   are separate PIDs. v1 covers plugin frames inside the host process only; those processes would
+   need process-level sampling of their own.
+5. **Sampling is statistics.** Short windows are noisy, so the panel must show the window length and
+   the sample count.
 
 ---
 
-## 8. 分阶段建议
+## 7. Ecosystem survey
 
-### Phase 1（MVP，风险低）
+There is **no comparable plugin** under the `dsh-plugin` topic:
 
-插件清单 + 全局指标（RSS / heap / event-loop lag / GC）+ 每插件 CPU 采样 +
-存活堆采样 + 文件操作计数 + 定时器/监听器/句柄清单 + 右侧栏面板表格排序。
+- `dsh-plugin-bench` is a **static quality score** (an eight-dimension scorecard) and does not
+  measure runtime cost;
+- the usage and cost meters track **model spend**, not plugin resource use.
 
-基本上是「接线」工作，全部机制已实测。
+The niche is empty.
+
+---
+
+## 8. Suggested phases
+
+### Phase 1 (MVP, low risk)
+
+Plugin inventory, process totals (RSS / heap / event-loop lag / GC), per-plugin CPU sampling,
+retained-heap sampling, file operation counts, timer/listener/handle inventory, and a sortable panel
+table.
+
+Mostly wiring: every mechanism has been measured.
 
 ### Phase 2
 
-时序历史（环状缓冲 + 可选 JSONL 落盘）+ 按需堆快照与 CPU 深度剖析 +
-单插件详情（热点函数、分配点、触碰的文件路径）+ 报告导出。
+Time-series history (ring buffer plus optional JSONL on disk), on-demand heap snapshots and deep CPU
+profiling, a per-plugin detail view (hot functions, allocation sites, files touched) and report
+export.
 
-主要工作量在**堆快照离线解析**，以及归因质量调优（打包插件、worker 线程、异步边界）。
+The bulk of the work is **offline heap-snapshot parsing** and attribution quality (bundled plugins,
+worker threads, async boundaries).
 
-### Phase 3（opt-in 深度模式）
+### Phase 3 (opt-in deep mode)
 
-`node:fs` 加载钩子实现字节级磁盘 I/O + 子进程采样 + 渲染进程指标。
+Byte-level disk I/O through a `node:fs` loader hook, child-process sampling and renderer metrics.
 
-风险最高，默认关闭，UI 明确标注为实验性。
+Highest risk; off by default and labelled experimental in the UI.
 
 ---
 
-## 9. 与被取代的临时脚本的关系
+## 9. What this replaces
 
-`dsh-context/.tmp/probe/probe.mts` 那套一次性基准脚本（回放本地会话语料，逐模块测 CPU）
-正是本插件要取代的东西。它的方法学值得继承：
+The one-off benchmark scripts in `dsh-context/.tmp/probe/probe.mts` (replaying a local session corpus
+and timing CPU module by module) are exactly what this plugin replaces. Their method is worth
+keeping:
 
-- 逐模块 / 逐事件类型隔离测量；
-- JIT 预热 + 重复运行 + 取中位数；
-- 报告落 JSON 供后续比对。
+- isolate measurements per module and per event type;
+- warm up the JIT, repeat runs and take the median;
+- write reports as JSON for later comparison.
 
-差别在于：本插件是**常驻**的，测的是**真实运行时**而非离线回放，
-并且能回答「哪个插件」而不是「哪个函数」。
+The difference: this plugin is **always on**, measures the **real runtime** rather than an offline
+replay, and answers "which plugin" rather than "which function".

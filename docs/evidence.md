@@ -1,37 +1,44 @@
-# 实测证据
+# Evidence
 
-本文件记录 [feasibility.md](feasibility.md) 中每条结论对应的**原始观测输出**与**复现方式**。
+This file holds the **raw observed output** behind each conclusion in [feasibility.md](feasibility.md)
+and the design documents, and **how to reproduce it**.
 
-- 环境：Windows / Node v24.18.0 / @deepseek-ai/dsh 0.1.7-alpha.1（GUI 宿主为纯 Node 进程）
-- 探针脚本位于 [`probes/`](../probes/)，全部可独立运行，无外部依赖
-- 所有探针都在**普通 Node 进程**中运行；机制本身与 DSH 无关，是 Node 运行时能力
+- Environment: Windows / Node v24.18.0 / @deepseek-ai/dsh 0.1.7-alpha.1 (the GUI host is a plain Node
+  process)
+- The probe scripts live in [`probes/`](../probes/). Each one runs on its own with no dependencies.
+- All probes run in an **ordinary Node process**: the mechanisms are Node runtime features, not
+  anything specific to DSH.
+
+Output blocks are copied verbatim, including the occasional Chinese label printed by a probe.
 
 ---
 
-## 证据 1：运行时形态（宿主是纯 Node 单进程）
+## Evidence 1: the host is a single plain Node process
 
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
   Select-Object ProcessId,@{n='WS_MB';e={[math]::Round($_.WorkingSetSize/1MB,1)}},CommandLine
 ```
 
-观测：
+Observed:
 
 ```
 ProcessId  WS_MB  CommandLine
     28108  680.80  "D:\Program Files\nodejs\node.exe" C:\Users\...\@deepseek-ai\dsh\lib\bin.js web --port 3081
 ```
 
-**结论**：
-- 当前 GUI（`http://127.0.0.1:3081`）由**单个 Node 进程**承载，RSS ≈ 680 MB。
-- 全部 host 插件同进程 → 不存在 OS 级「每插件内存」，必须进程内归因。
-- 纯 Node（非 Electron）→ `node:inspector` / `v8` / `async_hooks` 全部可用，无需 `--inspect` 端口。
+**Conclusions:**
+- The GUI at `http://127.0.0.1:3081` is served by **one Node process** with an RSS of about 680 MB.
+- Every host plugin shares that process, so there is no operating-system "memory per plugin";
+  attribution has to happen inside the process.
+- It is plain Node, not Electron, so `node:inspector`, `v8` and `async_hooks` are all available and
+  no `--inspect` port is needed.
 
 ---
 
-## 证据 2：插件可枚举
+## Evidence 2: plugins are enumerable
 
-来源：harness 自身实现 `packages/host/plugin-inventory/src/index.ts`。
+Source: the harness's own `packages/host/plugin-inventory/src/index.ts`.
 
 ```ts
 export class PluginInventoryGateway extends TypertRemoteService {
@@ -46,14 +53,15 @@ export class PluginInventoryGateway extends TypertRemoteService {
 }
 ```
 
-**结论**：任何 host 插件只要 `inject: ['loader']` 就能枚举插件清单，并拿到
-`moduleName` / `entryId` / fiber 状态 / 路径解析基准。归因映射表由此建立。
+**Conclusion:** any host plugin with `inject: ['loader']` can list the installed plugins and read each
+one's `moduleName`, `entryId`, fiber state and path-resolution anchor. The attribution map is built
+from this.
 
 ---
 
-## 证据 3：ESM 命名导入的内置模块**无法**被 monkey-patch
+## Evidence 3: built-ins imported by ESM name cannot be monkey-patched
 
-探针：[`probes/01-esm-builtin-patchability.mjs`](../probes/01-esm-builtin-patchability.mjs)
+Probe: [`probes/01-esm-builtin-patchability.mjs`](../probes/01-esm-builtin-patchability.mjs)
 
 ```
 ns readFileSync patched? true
@@ -63,19 +71,20 @@ startSamplingHeapProfiler: undefined stop: undefined
 inspector ok: function
 ```
 
-**结论**：
-1. 替换 `fs.readFileSync` 后，`fs` 命名空间对象确实变了，但**命名导入绑定不变**——
-   `import { readFileSync } from 'node:fs'` 走的是实例化时快照的绑定。
-   → 「补丁 fs 模块」对插件主流的 ESM 命名导入**静默失效**，会产出系统性偏低的假数据。
-2. `v8.startSamplingHeapProfiler` 在本 Node 版本**不存在**；堆采样必须走
-   `inspector` 的 `HeapProfiler.startSampling`。
-3. `v8.writeHeapSnapshot` 存在 → 精确 retained size 走「落盘 + 离线解析」。
+**Conclusions:**
+1. After replacing `fs.readFileSync`, the `fs` namespace object does change, but **the named-import
+   binding does not**: `import { readFileSync } from 'node:fs'` uses the binding captured when the
+   module was instantiated. Patching the `fs` module therefore **silently fails** for the ESM named
+   imports most plugins use, and produces data that is systematically too low.
+2. `v8.startSamplingHeapProfiler` **does not exist** in this Node version; heap sampling has to go
+   through `HeapProfiler.startSampling` on the inspector.
+3. `v8.writeHeapSnapshot` exists, so exact retained size means "write a snapshot, parse it offline".
 
 ---
 
-## 证据 4：CPU 与堆分配可按模块 URL 归因
+## Evidence 4: CPU and heap allocation can be attributed by module URL
 
-探针：[`probes/02-inspector-attribution.mjs`](../probes/02-inspector-attribution.mjs)
+Probe: [`probes/02-inspector-attribution.mjs`](../probes/02-inspector-attribution.mjs)
 
 ```
 cpu profile nodes: 9 samples: 83
@@ -93,22 +102,24 @@ heap stats: {"heapUsed":5190784}
 writeHeapSnapshot available: function
 ```
 
-**结论**：`Profiler.start/stop` 给出 `samples[]` + `nodes[].callFrame.url`；
-`HeapProfiler.startSampling/stopSampling` 给出带 `selfSize` 的 callFrame 树。
-两者都能按 url 聚合，而插件产物是自带 bundle 的 `lib/index.mjs`，url 与插件一一对应。
+**Conclusion:** `Profiler.start/stop` returns `samples[]` plus `nodes[].callFrame.url`;
+`HeapProfiler.startSampling/stopSampling` returns a call-frame tree with `selfSize`. Both can be
+grouped by URL, and each plugin ships its own bundled `lib/index.mjs`, so URLs map one-to-one onto
+plugins.
 
-> 注：堆采样的 `selfSize` 落在哪个 url 上**逐次运行会变**（第二次运行落在 `node:inspector`，
-> 因为采样窗口内最近的一次分配发生在那里）。这正说明该指标是**统计量**，
-> 面板必须展示样本数与窗口长度，不能把单次结果当定值。
+> Which URL the heap sample's `selfSize` lands on **changes between runs** (a second run put it on
+> `node:inspector`, where the last allocation inside the window happened). That is exactly why this
+> metric is a **statistic**: the panel must show the sample count and window length and never treat
+> one reading as a fixed value.
 
 ---
 
-## 证据 5（决定性）：归因必须做**祖先栈回溯**
+## Evidence 5 (decisive): attribution must walk the ancestor stack
 
-探针：[`probes/04-ancestor-walk.mjs`](../probes/04-ancestor-walk.mjs)
+Probe: [`probes/04-ancestor-walk.mjs`](../probes/04-ancestor-walk.mjs)
 
-构造：`pluginA.runA(200)` 与 `pluginB.runB(60)` 各自循环调用**同一个共享依赖** `shared/dep.mjs`。
-真实成本比应为 200 : 60 = **3.33**。
+Setup: `pluginA.runA(200)` and `pluginB.runB(60)` each call **the same shared dependency**
+`shared/dep.mjs` in a loop. The true cost ratio is 200 : 60 = **3.33**.
 
 ```
 direct (self-frame) attribution:
@@ -121,12 +132,12 @@ ancestor-walk attribution:
      2  (unattributed)
 ```
 
-| 策略 | pluginA | pluginB | 比值 | 结论 |
+| Strategy | pluginA | pluginB | Ratio | Verdict |
 | --- | --- | --- | --- | --- |
-| 按栈帧自身归属 | 1 | 0 | — | **失效**：573/574 样本落进无法归属的共享桶 |
-| 祖先栈回溯 | 441 | 131 | 3.37 | 与真实比 3.33 误差 < 1.5% |
+| Attribute by the frame itself | 1 | 0 | — | **Fails**: 573 of 574 samples land in the shared bucket nobody owns |
+| Walk up to the nearest plugin frame | 441 | 131 | 3.37 | Within 1.5% of the true 3.33 |
 
-第二次运行（同一脚本，采样窗口内样本分布不同）：
+Second run (same script, different sample distribution inside the window):
 
 ```
 direct (self-frame) attribution:
@@ -141,21 +152,22 @@ ancestor-walk attribution:
 ancestor-walk ratio = 3.58
 ```
 
-两次运行都指向同一结论：**朴素归属几乎全部失效（601/602、573/574 落入共享桶），
-祖先栈回溯稳定给出 3.37 ~ 3.58 的比值（真值 3.33，误差 < 8%）**。
-绝对误差来自采样随机性，随窗口加长收敛。
+Both runs agree: **naive attribution fails almost completely (601/602 and 573/574 samples in the
+shared bucket), while the ancestor walk consistently gives 3.37–3.58 against a true 3.33 (under 8%
+error).** The remaining error is sampling noise and shrinks with longer windows.
 
-**结论**：归因算法必须是「沿 `nodes[].children` 反向父指针回溯，直到遇到属于某个插件的栈帧」。
-这同时解决了「插件依赖的 node_modules 算谁的」——**算调用方插件的**。
+**Conclusion:** attribution must follow reverse parent pointers built from `nodes[].children` until
+it reaches a frame that belongs to a plugin. This also decides who pays for a plugin's
+`node_modules`: **the calling plugin**.
 
-> 若采用朴素的文件归属，任何带依赖的插件都会把自己的成本甩给共享依赖，
-> 面板会系统性地指错人。
+> With naive per-file attribution, every plugin with dependencies would pass its cost to the shared
+> dependency, and the panel would consistently blame the wrong party.
 
 ---
 
-## 证据 6：进程级磁盘 I/O 操作次数（精确、零依赖）
+## Evidence 6: process-wide disk I/O operation counts (exact, no dependencies)
 
-探针：[`probes/05-io-counters.mjs`](../probes/05-io-counters.mjs)
+Probe: [`probes/05-io-counters.mjs`](../probes/05-io-counters.mjs)
 
 ```
 resourceUsage before: {"fsRead":1,"fsWrite":0}
@@ -168,21 +180,22 @@ report.resourceUsage: {"free_memory":9582219264,"total_memory":34137300992,"rss"
   "fsActivity":{"reads":21,"writes":23}}
 ```
 
-**结论**：
-- `process.resourceUsage().fsRead / fsWrite` 在 Windows 上给出**精确的进程级读写操作次数**
-  （实测 20 写 + 20 读 → delta 恰好 20/20）。
-- `process.report.getReport()` 提供同源的 `fsActivity`，外加
-  `rss` / `maxRss` / `pageFaults` / `cpuConsumptionPercent`。
-- **这是操作次数，不是字节数。** 面板不能把它当作流量展示。
+**Conclusions:**
+- On Windows, `process.resourceUsage().fsRead / fsWrite` gives **exact process-wide read and write
+  operation counts** (20 writes + 20 reads produced a delta of exactly 20/20).
+- `process.report.getReport()` exposes the same data as `fsActivity`, plus `rss`, `maxRss`,
+  `pageFaults` and `cpuConsumptionPercent`.
+- **These are operation counts, not bytes.** The panel must not present them as throughput.
 
 ---
 
-## 证据 7：按插件的文件操作次数（精确、零补丁）
+## Evidence 7: per-plugin file operation counts (exact, no patching)
 
-探针：[`probes/06-async-hooks-fs.mjs`](../probes/06-async-hooks-fs.mjs)
+Probe: [`probes/06-async-hooks-fs.mjs`](../probes/06-async-hooks-fs.mjs)
 
-机制：`AsyncLocalStorage` 标记「当前插件」，`async_hooks` 的 `init(asyncId, type)` 观察
-`FSREQPROMISE` / `FSREQCALLBACK` / `FILEHANDLECLOSEREQ` / `FSEVENTWRAP` 等资源类型。
+Mechanism: an `AsyncLocalStorage` marks the current plugin, and `async_hooks` `init(asyncId, type)`
+observes resource types such as `FSREQPROMISE`, `FSREQCALLBACK`, `FILEHANDLECLOSEREQ` and
+`FSEVENTWRAP`.
 
 ```
 per-owner fs async-resource counts:
@@ -195,16 +208,17 @@ per-owner fs async-resource counts:
   fsRead: 5  fsWrite: 10
 ```
 
-**结论**：**无需任何 monkey-patch** 即可按插件统计异步文件操作。
+**Conclusion:** asynchronous file operations can be counted per plugin **with no monkey-patching**.
 
-**局限**：`readFileSync` / `writeFileSync` 不创建异步资源，**不计入**。
-同步 I/O 改由 CPU 采样中 `node:fs` 帧的祖先回溯覆盖（次数近似，归属正确）。
+**Limit:** `readFileSync` / `writeFileSync` create no async resource and **are not counted**.
+Synchronous I/O is covered instead by walking the ancestors of `node:fs` frames in the CPU profile
+(approximate counts, correct ownership).
 
 ---
 
-## 证据 8：采样开销矩阵
+## Evidence 8: sampling overhead matrix
 
-探针：[`probes/03-overhead.mjs`](../probes/03-overhead.mjs)
+Probe: [`probes/03-overhead.mjs`](../probes/03-overhead.mjs)
 
 ```
 --- compute-bound ---
@@ -222,10 +236,11 @@ both                               79 ms
   overhead: cpu +-0.5%  heap +-4.4%  both +12.4%
 ```
 
-**结论**：双采样常开在纯计算负载上 **+15% ~ +26%**（两次运行：+15.1% / +25.8%），不可接受。
-必须占空比轮转 + 按需深度采样 + 排除自身帧。
+**Conclusion:** leaving both samplers on costs **+15% to +26%** on a compute workload (two runs:
++15.1% and +25.8%), which is not acceptable. Duty-cycle rotation, on-demand deep sampling and
+self-frame exclusion are required.
 
-第二次运行（同一脚本）：
+Second run (same script):
 
 ```
 --- compute-bound ---
@@ -243,17 +258,16 @@ both                            62 ms
   overhead: cpu -2.1%  heap +5.7%  both -7.3%
 ```
 
-**读数须知**：这是微基准，绝对百分比波动很大，甚至会出现负值（异步 + I/O 负载被
-I/O 等待时间淹没，测量噪声大于采样开销）。可稳定复现的只有一条趋势：
-**纯计算负载上「两者同开」始终是最贵的一档**。不要引用单次具体数字做设计决策。
+**How to read this:** these are microbenchmarks. The absolute percentages swing widely and even go
+negative (on the async + I/O workload, I/O waits swamp the measurement and the noise exceeds the
+sampling cost). Only one trend reproduces: **on a compute workload, running both samplers is always
+the most expensive option**. Do not base design decisions on any single number.
 
-**附带发现**：`Profiler.stop` 在未启动状态下抛
-`Inspector error -32000: No recording profiles found`，
-start/stop 必须严格配对，状态机需要显式维护。
+**Side finding:** calling `Profiler.stop` when nothing is recording throws
+`Inspector error -32000: No recording profiles found`, so start and stop must be strictly paired and
+the state machine has to track them explicitly.
 
----
-
-## 复现方式
+### Reproducing evidence 3–8
 
 ```powershell
 cd D:\Build\dsh-perf-lens\probes
@@ -265,24 +279,129 @@ node 05-io-counters.mjs
 node 06-async-hooks-fs.mjs
 ```
 
-全部脚本在临时目录下创建自己的测试文件，运行结束后自行清理。
+Each script creates its own test files in a temporary directory and removes them when it finishes.
 
-## 证据 9：`runtime` 桶的构成——必须细分
+---
 
-面板曾把无插件栈帧的样本全部记为一行 `runtime`。实机上面板显示它常驻榜首
-（平均 36.8%、峰值 100%），这回答不了任何问题：GC 和 syscall 是两种完全不同的优化方向。
+## Evidence 9: the runtime bucket must be split
 
-探针：[probes/07-runtime-composition.mjs](../probes/07-runtime-composition.mjs)
-（Node v24，3079 个样本，250µs 间隔，3s 混合负载）。
+The panel used to count every sample without a plugin frame as a single `runtime` row. On a real
+host that row sat at the top of the board (36.8% average, 100% peak), which answers nothing: GC and
+syscalls call for completely different fixes.
 
-| 叶帧 | 占 runtime 桶 | 归类 |
+Probe: [probes/07-runtime-composition.mjs](../probes/07-runtime-composition.mjs)
+(Node v24, 3079 samples, 250µs interval, 3s mixed workload).
+
+| Leaf frame | Share of the runtime bucket | Classified as |
 | --- | --- | --- |
-| `(idle)` @ 空 url | 54.7% | `idle`（已在活动样本分母中剔除，不属于 runtime） |
-| `(garbage collector)` @ 空 url | 19.2% | `runtime:gc` |
-| `write` @ `node:string_decoder` 等 node 内部 | 13.7% + 长尾 | `runtime:node` |
-| `fstat` / `writeBuffer` / `close` @ 空 url | 长尾 | `runtime:native` |
-| `(program)` @ 空 url | 4.1% | `runtime:event-loop` |
+| `(idle)` with an empty URL | 54.7% | `idle` (already removed from the active-sample denominator; not runtime) |
+| `(garbage collector)` with an empty URL | 19.2% | `runtime:gc` |
+| `write` in `node:string_decoder` and other Node internals | 13.7% plus a long tail | `runtime:node` |
+| `fstat` / `writeBuffer` / `close` with an empty URL | long tail | `runtime:native` |
+| `(program)` with an empty URL | 4.1% | `runtime:event-loop` |
 
-结论：空 url + 有函数名 = 原生/libuv 帧；`node:` 与 `internal/` = node 内部；
-`(garbage collector)` = GC；`(root)` / `(program)` = 事件循环/程序根；其余为 `runtime` 残差。
-由 `attribute.ts` 的 `runtimeKindOfName` / `runtimeKindOfUrl` 实现，单测锁定。
+Rule: an empty URL with a function name is a native or libuv frame; `node:` and `internal/` are Node
+internals; `(garbage collector)` is GC; `(root)` / `(program)` is the event loop or program root;
+anything else stays in the `runtime` remainder. Implemented by `runtimeKindOfName` /
+`runtimeKindOfUrl` in `attribute.ts` and locked by unit tests.
+
+---
+
+## Evidence 10: all-zero rows made up ~98% of the log
+
+Measured on the history log `$DSH_HOME/perf-lens/metrics-20260923.jsonl` (2026-09-23, 268 windows):
+
+| Metric | Before filtering | After filtering (`rowHasActivity`) |
+| --- | --- | --- |
+| Plugin rows per line | 218.6 | 4.0 |
+| Bytes per line | 67 873 | 1 472 |
+| Whole file | 17.35 MB | 0.38 MB |
+
+**A 97.8% reduction.** The cause: `ctx.loader.entries()` also lists the 200+ harness-internal
+packages as loader entries. Their cost only ever appears under `harness:<pkg>` keys, so their
+`plugin:<pkg>` rows are always zero, and external plugins are mostly zero in idle windows too. An
+all-zero row carries no measurement; it just restates the plugin inventory. The live snapshot keeps
+every row (the panel table lists all plugins); only the persisted copy is filtered.
+
+Reproduce with [probes/17-log-line-compaction.mjs](../probes/17-log-line-compaction.mjs), which
+rewrites an existing log through `serializeSnapshot` and reports the difference:
+
+```powershell
+node probes/17-log-line-compaction.mjs "$env:USERPROFILE\.dsh\perf-lens\metrics-20260923.jsonl"
+```
+
+What this implies: a missing row means zero activity, so `avgCpuShare` in `aggregateStats` averages
+over every window in the range (see `shareDenominator` in `src/host/stats.ts`), consistent with the
+bucket averages in `aggregateTrend`.
+
+---
+
+## Evidence 11: mechanism C (async boundaries) is attributable
+
+The ancestor walk cannot handle a plugin that hands work to a harness timer or callback: when the
+callback runs, the plugin's frame is no longer on the stack. Probe
+[probes/19-mechanism-c.mjs](../probes/19-mechanism-c.mjs) builds that case (a plugin passes data to
+the harness, which does the heavy work in a `setTimeout` callback) and attributes **the same CPU
+profile** two ways:
+
+| Method | harness | plugin |
+| --- | --- | --- |
+| Ancestor stack (the original rule) | 714 | 0 |
+| Async context (async_hooks execution windows matched against sample timestamps) | 0 | 705 |
+
+In the cross-tabulation, **701 samples are "harness" by stack and "plugin" by async context** (another
+3 `runtime:node` samples and 1 `runtime:gc` sample also fall inside the plugin's windows). That is the
+size of mechanism C in this setup.
+
+The mechanisms the implementation depends on:
+
+- The V8 profile's `startTime` is a **monotonic clock since boot** (5 745 870 256µs in this run) and
+  shares no origin with `performance.now()`. `timeDeltas` must be rebased onto the wall clock the
+  sampler records at start and stop (measured 1115.2ms against 1105.6ms, about 0.9% drift).
+- The `async_hooks` `init` stack says who created an async resource, and `before` / `after` give the
+  callback's execution window. Intersecting sample timestamps with those windows hands each sample
+  back to the plugin that started the work.
+
+Cost: `init` captures a stack per resource and `before` / `after` fire on every callback, so this
+**must never stay on**. The product enables it only inside deep-mode windows (`asyncAttribution`) and
+switches it off as soon as the window ends. Implementation: `src/host/async-attribution.ts`.
+
+---
+
+## Evidence 12: re-parsing history on every panel refresh
+
+With the panel open, the host's own overhead (`self`) was the second-largest cost in the 24h ranking.
+The range endpoints re-read and re-parsed every history file on each call, synchronously, and the
+panel called two of them every 15 seconds. Today's log was 39 MB because 572 of its 587 lines were
+written before evidence 10's filtering (about 66 KB each).
+
+Timed from the browser against the live host (2026-09-23, `fetch` round trip including transfer):
+
+```
+before (full re-parse on every call)
+  /api-perf/stats?range=24h   221ms   41KB
+  /api-perf/trend?range=24h   202ms  143KB
+  /api-perf/stats?range=7d    168ms   41KB
+  /api-perf/trend?range=7d    176ms  143KB
+
+after (HistoryStore.summaries: parse once, then only the appended tail)
+  round 1  /api-perf/stats?range=24h  132ms   4KB    <- first read parses the 39 MB file once
+  round 1  /api-perf/trend?range=24h    7ms  33KB
+  round 2  /api-perf/stats?range=24h    6ms   4KB
+  round 2  /api-perf/trend?range=24h    7ms  33KB
+  round 3  /api-perf/stats?range=7d     8ms   4KB
+```
+
+The payloads shrank because the cache drops all-zero rows from the old lines as it loads them, so the
+ranking went from 219 rows (201 of them 0.0ms) to 18, and the trend from 219 series to 18.
+
+Reproduce against a running host (PowerShell):
+
+```powershell
+foreach ($i in 1..3) {
+  (Measure-Command { Invoke-RestMethod "http://127.0.0.1:3081/api-perf/stats?range=24h" }).TotalMilliseconds
+}
+```
+
+The first call after a host restart pays the one-time parse; later calls should stay in single-digit
+milliseconds until the log grows by more than a few windows.
