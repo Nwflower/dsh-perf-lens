@@ -1,12 +1,20 @@
 # dsh-perf-lens
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-%E2%89%A50.1.7--alpha.1-blue)](CHANGELOG.md)
+
 A DeepSeek Harness (DSH) plugin that shows **which plugin is using your host's CPU, memory and
-disk**.
+disk — and which plugin is making the browser jank**.
 
 Every DSH host plugin runs in one Node process, so the operating system can only tell you what the
 whole process costs. Perf Lens samples that process from the inside, charges each sample to the
-plugin that caused it, and puts the result in a dashboard in the DSH web GUI. No more throwaway
-profiling scripts when something feels slow.
+plugin that caused it, and puts the result in a dashboard in the DSH web GUI — with the same
+treatment on the browser side, where long-frame script time is attributed per plugin (Long
+Animation Frames API). No more throwaway profiling scripts when something feels slow.
+
+> **Status:** 0.1.0 feature-complete (see [CHANGELOG.md](CHANGELOG.md)); 0.2.0 is in progress on
+> `master` — per-plugin jank attribution, the descendant-process view, and the listeners / on-disk
+> columns have already landed.
 
 ## What you get
 
@@ -40,25 +48,32 @@ The panel follows the GUI language (Chinese or English).
 
 ## Install
 
-Add the package to your DSH profile and list it as a bundle. For the default web profile, edit
+Not on npm yet — install from a local checkout:
+
+```bash
+git clone https://github.com/Nwflower/dsh-perf-lens.git
+cd dsh-perf-lens && pnpm install && pnpm build   # produces lib/ (host + single-file client bundle)
+```
+
+Then register it in your DSH profile. For the default web profile, edit
 `~/.dsh/profiles/web/package.json`:
 
 ```jsonc
 {
   "dsh": { "profile": { "bundles": [ /* … existing bundles … */, "dsh-perf-lens" ] } },
-  "dependencies": { "dsh-perf-lens": "^0.1.0" }
+  "dependencies": { "dsh-perf-lens": "link:D:/path/to/dsh-perf-lens" }
 }
 ```
-
-Then install and restart the host:
 
 ```bash
 cd ~/.dsh/profiles/web && pnpm install
 ```
 
-The host half loads when the server starts, so restart `dsh web` for it to take effect. If the
-profile's pnpm supply-chain policy (`minimumReleaseAge`) blocks a package, run a one-off
-`pnpm install --config.minimumReleaseAge=0` instead of changing the profile's settings.
+The host half loads when the server starts, so restart `dsh web` for it to take effect. Once the
+package is published to npm, the dependency line becomes `"dsh-perf-lens": "^0.1.0"` and no build
+step is needed. If the profile's pnpm supply-chain policy (`minimumReleaseAge`) blocks a package,
+run a one-off `pnpm install --config.minimumReleaseAge=0` instead of changing the profile's
+settings.
 
 ## Sampling controls
 
@@ -197,15 +212,8 @@ pnpm build        # tsdown: lib/index.js (host) + lib/client.js (single-file cli
 
 `prepublishOnly` runs all four.
 
-To try a local checkout, link it into a profile instead of installing from the registry:
-
-```jsonc
-// ~/.dsh/profiles/web/package.json
-"dependencies": { "dsh-perf-lens": "link:D:/Build/dsh-perf-lens" }
-```
-
-Rebuild with `pnpm build`, then reload the page to pick up client changes; host changes need a
-restart of `dsh web`.
+After local changes, rebuild with `pnpm build`, then reload the page to pick up client changes;
+host changes need a restart of `dsh web`.
 
 The harness client type packages are not installed as dev dependencies: their registry `latest` tag
 points at a broken 0.0.1-rc.1 line that depends on an unpublished package. The client declares the
@@ -223,6 +231,14 @@ structural types it needs in `src/client/ctx.ts` instead, as dsh-context does.
 | [docs/design-overnight-analyzer.md](docs/design-overnight-analyzer.md) | Research on continuous background analysis: sampler cost, heap snapshots (rejected), share vs absolute cost, detection precision |
 | [probes/README.md](probes/README.md) | The one-off research scripts and what each one established |
 | [CHANGELOG.md](CHANGELOG.md) | What each release contains |
+
+## Ecosystem
+
+More DSH plugins by the same author:
+[dsh-chat-import](https://github.com/Nwflower/dsh-chat-import) (migrate 25+ external agents' chat
+history into DSH) · [dsh-pilot](https://github.com/Nwflower/dsh-pilot) (contract-driven
+master/subagent dispatch) · [dsh-file-claim](https://github.com/Nwflower/dsh-file-claim)
+(multi-session file claiming) · [dsh-claude-style](https://github.com/Nwflower/dsh-claude-style)
 
 ## License
 
