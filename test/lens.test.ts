@@ -94,10 +94,10 @@ describe('Lens.runWindow', () => {
     const lens = new Lens({ ...h.deps, hotspots: store })
     await lens.runWindow()
     expect(store.get('pluginA')).toBeNull()
-    lens.setDeep(true)
+    lens.setSampling({ memory: true })
     await lens.runWindow()
     expect(store.get('pluginA')).not.toBeNull()
-    lens.setDeep(false)
+    lens.setSampling({ memory: false })
     await lens.runWindow()
     expect(store.get('pluginA')).toBeNull()
   })
@@ -116,7 +116,7 @@ describe('Lens.runWindow', () => {
   test('continuous mode uses the short window', async () => {
     const h = makeHarness()
     const lens = new Lens(h.deps)
-    lens.setMode('continuous')
+    lens.setSampling({ intensity: 'high' })
     await lens.runWindow()
     expect(h.sleeps).toContain(DEFAULT_LENS_OPTIONS.continuousWindowMs)
     expect(lens.snapshot().mode).toBe('continuous')
@@ -145,7 +145,7 @@ describe('Lens.runWindow', () => {
   test('deep mode samples the heap as well', async () => {
     const h = makeHarness()
     const lens = new Lens(h.deps)
-    lens.setDeep(true)
+    lens.setSampling({ memory: true })
     await lens.runWindow()
     expect(h.sampler.startHeap).toHaveBeenCalledTimes(1)
     expect(h.sampler.stopHeap).toHaveBeenCalledTimes(1)
@@ -172,6 +172,34 @@ describe('diagnostics', () => {
     expect(diagnostics.lastError).toBeNull()
   })
 
+  test('says which 0.2.0 collectors engaged, so an empty reading is not read as zero cost', async () => {
+    const h = makeHarness()
+    // No collectors wired at all: the harness used by every other test.
+    const bare = new Lens(h.deps).diagnostics()
+    expect(bare.processTree).toEqual({ available: false, at: 0, count: 0, coverage: 0 })
+    expect(bare.diskFootprint).toBeNull()
+    expect(bare.listenersMeasured).toBe(false)
+
+    const wired = new Lens({
+      ...h.deps,
+      listenerCounts: () => new Map([['plugin:pluginA', 3]]),
+      processTree: () => ({ at: 42, count: 2, rssBytes: 100, cpuCoreShare: 1.5, intervalMs: 30_000, coverage: 0.5, top: [] }),
+      diskFootprintReading: () => ({ scannedAt: 7, scannedFiles: 9, scannedBytes: 100, ownedBytes: 60, truncated: true }),
+    }).diagnostics()
+    expect(wired.processTree).toEqual({ available: true, at: 42, count: 2, coverage: 0.5 })
+    expect(wired.diskFootprint).toEqual({ scannedAt: 7, scannedFiles: 9, ownedBytes: 60, truncated: true })
+    expect(wired.listenersMeasured).toBe(true)
+  })
+
+  test('a listener registry that throws is reported as unmeasured, not as zero listeners', async () => {
+    const h = makeHarness()
+    const lens = new Lens({
+      ...h.deps,
+      listenerCounts: () => { throw new Error('registry exploded') },
+    })
+    expect(lens.diagnostics().listenersMeasured).toBe(false)
+  })
+
   test('the duty loop records a swallowed window error', async () => {
     const h = makeHarness()
     h.sampler.startCpu.mockRejectedValue(new Error('profiler exploded'))
@@ -195,7 +223,7 @@ describe('diagnostics', () => {
 })
 
 describe('loop safety', () => {
-  test('setMode wakes the idle sleep so controls take effect immediately', async () => {
+  test('setSampling wakes the idle sleep so controls take effect immediately', async () => {
     const h = makeHarness()
     const clock = {
       sleep: (ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms) }),
@@ -208,7 +236,7 @@ describe('loop safety', () => {
     lens.start()
     await new Promise<void>(resolve => { setTimeout(resolve, 60) })
     const first = lens.diagnostics().windowStartedAt
-    lens.setMode('continuous')
+    lens.setSampling({ intensity: 'high' })
     await new Promise<void>(resolve => { setTimeout(resolve, 80) })
     lens.stop()
     // Without the wake, the loop would still be inside the 10s idle sleep.
@@ -228,7 +256,7 @@ describe('loop safety', () => {
       clock,
       ownerIndex: () => { throw new Error('owner index exploded') },
     })
-    lens.setMode('continuous')
+    lens.setSampling({ intensity: 'high' })
     lens.start()
     const macrotaskRan = await new Promise<boolean>(resolve => {
       setTimeout(() => { resolve(true) }, 20)
@@ -261,7 +289,7 @@ describe('continuous mode budget', () => {
       now: () => Date.now(),
     }
     const lens = new Lens({ ...h.deps, clock, ownerIndex: () => { throw new Error('boom') } })
-    lens.setMode('continuous')
+    lens.setSampling({ intensity: 'high' })
     lens.start()
     await new Promise<void>(resolve => { setTimeout(resolve, 30) })
     lens.stop()
@@ -291,7 +319,7 @@ describe('background profile', () => {
   test('uses the coarse interval and the short window', async () => {
     const h = makeHarness()
     const lens = new Lens(h.deps)
-    lens.setMode('background')
+    lens.setSampling({ intensity: 'paused', background: true })
     await lens.runWindow()
     expect(h.sleeps).toContain(DEFAULT_LENS_OPTIONS.backgroundWindowMs)
     expect(h.sampler.startCpu).toHaveBeenCalledWith(DEFAULT_LENS_OPTIONS.backgroundCpuIntervalUs)
@@ -554,5 +582,180 @@ describe('sampleIntervalMs (what one sample is worth)', () => {
     expect(snapshot.global.sampleIntervalMs).toBeCloseTo(0.54, 5)
     expect(snapshot.plugins.find(row => row.moduleName === 'pluginA')?.cpuSelfMs).toBeCloseTo(200 * 0.54, 5)
     expect(snapshot.plugins.find(row => row.moduleName === 'pluginB')?.cpuSelfMs).toBeCloseTo(60 * 0.54, 5)
+  })
+})
+
+describe('sampling controls (three blocks, one profile)', () => {
+  test('a control change reaches the panel before the next window lands', async () => {
+    const h = makeHarness()
+    const lens = new Lens(h.deps)
+    await lens.runWindow()
+    lens.setSampling({ intensity: 'high', memory: true })
+    const snapshot = lens.snapshot()
+    // The panel polls /snapshot on its own cadence and reads the mode from
+    // there; a mode only refreshed per window would leave the segment showing
+    // the old tier for up to two minutes in the background profile.
+    expect(snapshot.mode).toBe('continuous')
+    expect(snapshot.sampling).toEqual({ intensity: 'high', background: false, memory: true })
+    // The window already collected is untouched: controls change the next one.
+    expect(snapshot.global.sampleWindowMs).toBe(DEFAULT_LENS_OPTIONS.windowMs)
+  })
+
+  test('stopping only stops when background sampling is off', async () => {
+    const h = makeHarness()
+    const lens = new Lens(h.deps)
+    lens.setSampling({ intensity: 'paused' })
+    expect(lens.mode).toBe('paused')
+    lens.setSampling({ background: true })
+    expect(lens.mode).toBe('background')
+    await lens.runWindow()
+    expect(h.sampler.startCpu).toHaveBeenCalledWith(DEFAULT_LENS_OPTIONS.backgroundCpuIntervalUs)
+    lens.setSampling({ background: false })
+    expect(lens.mode).toBe('paused')
+  })
+
+  test('memory sampling turns heap sampling on without changing the mode', async () => {
+    const h = makeHarness()
+    const lens = new Lens(h.deps)
+    expect(lens.mode).toBe('duty')
+    lens.setSampling({ memory: true })
+    expect(lens.mode).toBe('duty')
+    await lens.runWindow()
+    expect(h.sampler.startHeap).toHaveBeenCalledTimes(1)
+  })
+
+  test('the high tier drops back to low when its budget runs out', async () => {
+    const h = makeHarness()
+    // A clock whose sleeps cost a macrotask: the harness clock resolves in a
+    // microtask, which turns a loop test into an unbounded allocation run.
+    let nowValue = 0
+    const clock = { sleep: async (_ms: number) => { await new Promise<void>(resolve => { setTimeout(resolve, 1) }) }, now: () => nowValue }
+    const lens = new Lens({ ...h.deps, clock }, { ...DEFAULT_LENS_OPTIONS, continuousMaxMs: 1000 })
+    lens.setSampling({ intensity: 'high' })
+    expect(lens.mode).toBe('continuous')
+    // Past the budget: the first loop check must demote the tier, so the
+    // segment cannot stay lit on "high" while the loop samples at the low rate.
+    nowValue = 5000
+    lens.start()
+    await new Promise<void>(resolve => { setTimeout(resolve, 20) })
+    lens.stop()
+    expect(lens.sampling.intensity).toBe('low')
+    expect(lens.mode).toBe('duty')
+    expect(lens.snapshot().mode).toBe('duty')
+  })
+
+  test('re-entering the high tier restarts its budget', async () => {
+    const h = makeHarness()
+    let nowValue = 0
+    const clock = { sleep: async (_ms: number) => { await new Promise<void>(resolve => { setTimeout(resolve, 1) }) }, now: () => nowValue }
+    const lens = new Lens({ ...h.deps, clock }, { ...DEFAULT_LENS_OPTIONS, continuousMaxMs: 1000 })
+    lens.setSampling({ intensity: 'high' })
+    nowValue = 5000
+    lens.setSampling({ intensity: 'low' })
+    // A stale deadline would expire the new high tier on its first check.
+    lens.setSampling({ intensity: 'high' })
+    nowValue = 5500
+    lens.start()
+    await new Promise<void>(resolve => { setTimeout(resolve, 20) })
+    lens.stop()
+    expect(lens.sampling.intensity).toBe('high')
+  })
+
+  test('one block changes without disturbing the others', () => {
+    const h = makeHarness()
+    const lens = new Lens(h.deps)
+    lens.setSampling({ intensity: 'high', background: true, memory: true })
+    lens.setSampling({ memory: false })
+    expect(lens.sampling).toEqual({ intensity: 'high', background: true, memory: false })
+  })
+})
+
+describe('0.2.0 readings', () => {
+  /** The default harness, with the process-CPU figure the residual is computed from. */
+  function withProcessCpu(processCpuMs: number) {
+    const h = makeHarness()
+    const metrics = h.deps.metrics as unknown as { read: (windowMs: number, sampleCount: number) => Record<string, unknown> }
+    const original = metrics.read
+    metrics.read = (windowMs, sampleCount) => ({ ...original(windowMs, sampleCount), processCpuMs })
+    return h
+  }
+
+  test('unexplained CPU is what the profile could not account for', async () => {
+    // 260 samples over a 5000ms window: the profile accounts for 5000ms of CPU.
+    const h = withProcessCpu(9_000)
+    const snapshot = await new Lens(h.deps).runWindow()
+    expect(snapshot.global.unexplainedCpuMs).toBeCloseTo(4_000, 6)
+  })
+
+  test('unexplained CPU never goes negative when the clocks disagree', async () => {
+    // The platform CPU clock quantizes (~15.6ms on Windows), so a quiet window
+    // can report slightly less process CPU than the samples account for.
+    const h = withProcessCpu(4_900)
+    const snapshot = await new Lens(h.deps).runWindow()
+    expect(snapshot.global.unexplainedCpuMs).toBe(0)
+  })
+
+  test('listener counts land on the plugin row, and harness sub-packages fold', async () => {
+    const h = makeHarness()
+    const lens = new Lens({
+      ...h.deps,
+      listenerCounts: () => new Map([
+        ['plugin:pluginA', 12],
+        ['harness:@deepseek-ai/dsh-core', 5],
+        ['harness:@deepseek-ai/dsh-web', 7],
+      ]),
+    })
+    const snapshot = await lens.runWindow()
+    expect(snapshot.plugins.find(row => row.moduleName === 'pluginA')?.listeners).toBe(12)
+    expect(snapshot.plugins.find(row => row.moduleName === 'harness')?.listeners).toBe(12)
+  })
+
+  test('an unreadable listener registry leaves the column absent, not zero', async () => {
+    const h = makeHarness()
+    const lens = new Lens({ ...h.deps, listenerCounts: () => null })
+    const snapshot = await lens.runWindow()
+    expect(snapshot.plugins.find(row => row.moduleName === 'pluginA')?.listeners).toBeUndefined()
+  })
+
+  test('an owner with listeners but no sampled CPU still gets a row', async () => {
+    const h = makeHarness()
+    const lens = new Lens({ ...h.deps, listenerCounts: () => new Map([['plugin:quiet-plugin', 3]]) })
+    const snapshot = await lens.runWindow()
+    const row = snapshot.plugins.find(candidate => candidate.moduleName === 'plugin:quiet-plugin')
+    expect(row?.listeners).toBe(3)
+    expect(row?.cpuSelfMs).toBe(0)
+  })
+
+  test('on-disk bytes land on the plugin row and fold for harness packages', async () => {
+    const h = makeHarness()
+    const lens = new Lens({
+      ...h.deps,
+      diskFootprint: () => new Map([
+        ['plugin:pluginB', 2048],
+        ['harness:@deepseek-ai/dsh-core', 1024],
+      ]),
+    })
+    const snapshot = await lens.runWindow()
+    expect(snapshot.plugins.find(row => row.moduleName === 'pluginB')?.diskFootprintBytes).toBe(2048)
+    expect(snapshot.plugins.find(row => row.moduleName === 'harness')?.diskFootprintBytes).toBe(1024)
+  })
+
+  test('the process tree and footprint readings are gauges on the snapshot, not the window', async () => {
+    const h = makeHarness()
+    const tree = { at: 5, count: 4, rssBytes: 4096, cpuCoreShare: 2.5, intervalMs: 30_000, coverage: 1, top: [] }
+    const disk = { scannedAt: 7, scannedFiles: 9, scannedBytes: 100, ownedBytes: 60, truncated: false }
+    const lens = new Lens({ ...h.deps, processTree: () => tree, diskFootprintReading: () => disk })
+    // Before any window: a panel opened at boot must still see them.
+    expect(lens.snapshot().processTree).toEqual(tree)
+    expect(lens.snapshot().diskFootprint).toEqual(disk)
+    const snapshot = await lens.runWindow()
+    expect(snapshot.processTree).toEqual(tree)
+    expect(snapshot.diskFootprint).toEqual(disk)
+  })
+
+  test('a host with no tree reading reports nothing rather than an empty tree', async () => {
+    const h = makeHarness()
+    const lens = new Lens({ ...h.deps, processTree: () => null })
+    expect(lens.snapshot().processTree).toBeUndefined()
   })
 })

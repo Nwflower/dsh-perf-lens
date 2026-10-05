@@ -441,3 +441,352 @@ unaffected: they are ratios of sample counts. The interval now comes from the pr
 Reproduce: divide any row's `cpuSelfMs` by its sample count
 (`cpuShare × (sampleCount − idleSamples)`); it should equal `global.sampleIntervalMs`, and the rows
 should sum to `(sampleCount − idleSamples) × sampleIntervalMs`.
+
+---
+
+## Evidence 14: worker threads are invisible to the host sampler
+
+Source: `probes/20-worker-thread-blindspot.mjs`. A worker busy-loops for ~700 ms while the main
+thread busy-loops for the same span, and one `inspector.Session` profiles the main thread throughout.
+Run twice (2026-09-24):
+
+```
+--- probe 20: worker threads vs a main-thread CPU profile ---
+wall clock                : 727 ms (main thread busy ~700 ms, worker busy ~700 ms)
+process CPU actually used : 1406.0 ms  (193% of one core)
+CPU time the profile saw  : 723.2 ms
+main-thread samples       : 374
+distinct frame urls       : 4
+frames from the worker    : 0  <-- 0 means the worker is invisible
+cpuConsumptionPercent     : 148.3  (>100 means more than one thread ran)
+report.workers (live)     : []
+
+--- probe 20: worker threads vs a main-thread CPU profile ---
+wall clock                : 730 ms (main thread busy ~700 ms, worker busy ~700 ms)
+process CPU actually used : 1438.0 ms  (197% of one core)
+CPU time the profile saw  : 725.4 ms
+main-thread samples       : 381
+distinct frame urls       : 2
+frames from the worker    : 0  <-- 0 means the worker is invisible
+cpuConsumptionPercent     : 151.5  (>100 means more than one thread ran)
+report.workers (live)     : []
+```
+
+**Conclusions:**
+- An `inspector.Session` opened in the host thread profiles **that isolate only**. The profile captured
+  ~723 ms of the ~1406 ms the process actually burned — the main thread's share, and **0 frames** from
+  the worker.
+- The process-level denominator **does** include the worker (`cpuConsumptionPercent` > 100 in both
+  runs), so a plugin that moves work into a worker is counted in the total but attributed to nothing.
+  Every per-plugin share and ms/s figure is then systematically low, with no marker saying so — the
+  same failure mode as the ESM monkey-patch trap in [Evidence 3](#evidence-3-built-ins-imported-by-esm-name-cannot-be-monkey-patched),
+  and a violation of hard constraint 4 (inexact metrics must carry a coverage marker).
+- `process.report.getReport()` cannot even detect the situation: `workers` is `[]` while a worker is
+  alive, so there is no free "a worker exists" signal.
+- The host itself does spawn workers — `packages/session/session-persistence-jsonl/src/migration-verifier.ts`
+  and the experimental `packages/experimental/inspector` bridge both use `new Worker(...)` — and any
+  third-party plugin can. The gap is reachable, not hypothetical.
+- The cheapest honest fix needs no new interception: the process CPU actually used per window is
+  already known (`process.resourceUsage()` / `cpuConsumptionPercent`), so the residual
+  `process CPU − attributed sample time − known runtime buckets` can be published as an explicit
+  **"unexplained CPU"** figure. A sustained large residual is the signal that a worker (or native
+  thread) is running.
+
+---
+
+## Evidence 15: an always-on async_hooks hook is too expensive for a live timer gauge
+
+Source: `probes/21-async-hooks-cost.mjs`. Three workloads run with no hook, with an enabled hook
+whose `init` does only what a live timer/handle counter would do (two `Set` lookups), and with the
+same hook plus a stack capture per timer/handle. Median of three runs. Two runs (2026-09-24):
+
+```
+--- probe 21: cost of an always-on async_hooks hook ---
+promise churn   off 8ms | hook 18ms (122.7%) | hook+stack 27ms (230.9%)
+  runs off=11/8/8 hook=18/18/18
+timer churn     off 7ms | hook 6ms (-9.0%) | hook+stack 688ms (10124.8%)
+  runs off=16/7/3 hook=6/6/6
+mixed           off 25ms | hook 30ms (23.7%) | hook+stack 394ms (1505.3%)
+  runs off=18/25/25 hook=30/25/38
+
+--- probe 21: cost of an always-on async_hooks hook ---
+promise churn   off 7ms | hook 18ms (160.0%) | hook+stack 21ms (207.4%)
+  runs off=9/7/7 hook=18/18/18
+timer churn     off 7ms | hook 4ms (-40.5%) | hook+stack 635ms (8727.5%)
+  runs off=12/7/7 hook=7/2/4
+mixed           off 40ms | hook=32ms (-19.4%) | hook+stack 374ms (829.2%)
+  runs off=26/40/41 hook=32/26/37
+```
+
+**Conclusions:**
+- The one reproducible signal is **promise churn**: an enabled hook takes it from 7–8ms to 18ms in
+  every run of both passes (≈2.3–2.6×). The timer-churn and mixed ratios swing between runs and must
+  not be quoted individually.
+- A stack capture per timer is far worse: 50 000 timers cost 635–688ms with the hook, i.e. about
+  **13µs per timer**, against single-digit milliseconds without it.
+- This is why `IoTracker` enables its hook only inside a sampling window, and why **per-plugin timer
+  and handle counts are not shipped**: an always-on hook is a permanent +2.5× on promise-heavy work
+  (worse than the +15–26% the profilers cost, hard constraint 3), while a window-scoped gauge would
+  undercount every resource created between windows and read as a false zero.
+- The cheap exact substitutes that did ship: **listener counts** read out of the cordis event
+  registry (no hook at all), and a **process-wide** active-resource count from
+  `process.getActiveResourcesInfo()`, which is native and needs no hook.
+
+---
+
+## Evidence 16: per-plugin listener counts need no patching
+
+Source: `probes/22-listener-registry.mjs`, run against the real `@deepseek-ai/cordis` 4.0.4 from
+this repo's `node_modules`. Two plugins register listeners; the probe reads the event service's
+registry and attributes each record through the fiber map the plugin builds from loader entries.
+Identical in both runs (2026-09-24):
+
+```
+--- probe 22: the cordis listener registry as an attribution source ---
+root.events present          : true
+registry exposes _hooks      : true
+event names in the registry  : internal/listener, internal/update, session/event, tool/execute
+session/event hook count     : 2
+a hook carries ctx.fiber     : true
+each plugin has its own fiber: true
+fiber.name (display name)    : dsh-alpha
+attributed counts            : plugin:dsh-alpha=2, plugin:dsh-beta=1
+unmapped fibers are skipped  : 0 owners
+```
+
+**Conclusions:**
+- `ctx.events` is the event service and its `_hooks` registry is readable from a plugin. Each stored
+  record carries `ctx`, whose `fiber` is the plugin's own fiber — so the owning plugin is known
+  **exactly**, with no wrapping of `ctx.on`, no prototype patch and no heuristic.
+- Attribution lands on the same owner key the path index produces (`plugin:<moduleName>`), because
+  both go through `ownerOfModule` in `plugin-index.ts`.
+- A fiber that is not in the loader map is **skipped**, not guessed: an unmapped registry yields
+  0 owners rather than a pile of misattributed listeners.
+- This is why `PluginMetricRow.listeners` is exact while `timers` and `handles` are absent
+  ([evidence 15](#evidence-15-an-always-on-async_hooks-hook-is-too-expensive-for-a-live-timer-gauge)):
+  the mechanism that works needs no hook at all, and the mechanism that needs a hook does not work.
+- Residual risk: `_hooks` is an internal field of cordis. `countListeners` returns `null` when it is
+  missing or not an object, and the panel renders a gap — so a cordis rename degrades to "not
+  measured" rather than to a false zero.
+
+---
+
+## Evidence 17: LoAF script attribution — where it works and what it resolves
+
+Source: `probes/23-loaf-attribution.mjs` plus two throwaway scripts (kept in `.tmp/` during the
+run): a same-origin proxy page driven in headless Chrome, and a combo reconstructor that
+rebuilds the live 14-plugin batch from the on-disk plugin files per `buildComboScript`.
+Environment: DSH Desktop 0.1.7-rc.2 (Electron 44, Chrome 152.0.7977.54), dsh web GUI at
+http://127.0.0.1:19387 served from the npm-global dsh CLI.
+
+### 17a. The desktop window withholds script attribution entirely
+
+A `PerformanceObserver` of type `long-animation-frame` was installed in the DSH Desktop window
+(`dsh-app://app/`, same plugins) and left running through real streamed answers, plus forced
+long frames (a sourceURL-named busy loop of 180–200 ms):
+
+```
+{"frames":375,"withScripts":0,"streamingNow":2,"biggest":[5541,2377,2054,1855,1817]}
+```
+
+A raw frame from the forced busy loop (650 ms duration, 579 ms blocking, the script
+unambiguously executed):
+
+```
+{"name":"long-animation-frame","entryType":"long-animation-frame","startTime":7349193.8,
+ "duration":650.2,"renderStart":7349736.5,"styleAndLayoutStart":7349843.4,
+ "blockingDuration":579.3,"scripts":[]}
+```
+
+**Conclusion:** on the `dsh-app://` custom scheme, Chromium reports long-animation-frame entries
+but the `scripts` list is empty for every frame — even for frames whose blocking time is a
+single named script. Script attribution is unavailable in the desktop window, so there the
+panel keeps the correlation fallback. (The mechanism matches the spec: attribution is withheld
+when the script is not same-origin with the observing window; resources loaded through the
+custom protocol do not satisfy that check, and the page origin reads `dsh-app://app`.)
+
+### 17b. Same-origin http attribution works, and the real combo registers end to end
+
+Headless Chrome loaded a page that (1) stubs the module-loader queue, (2) loads the real
+14-plugin batch combo — reconstructed byte-exactly from the on-disk plugin files, because the
+live host answers combo requests only for script-load destinations (fetch gets 404) — and
+(3) runs a 400 ms busy loop in a same-origin classic script:
+
+```
+registrations: 14
+  registered: @deepseek-ai/dsh-client-ui-deliverables
+  registered: @eddyskywalker/dsh-chatgpt-subscription
+  registered: dsh-desktop-bridge
+  registered: @wxg-prc-cpg/browser-skill-dsh-plugin
+  registered: dsh-chat-import
+  registered: dshmarket
+  registered: @deepseek-ai/dsh-typert-registry
+  registered: @deepseek-ai/dsh-client-connection
+  registered: dsh-context
+  registered: dsh-claude-style
+  registered: @deepseek-ai/dsh-api-workspace-controller
+  registered: dsh-cost-meter
+  registered: @deepseek-ai/dsh-api-session-controller
+  registered: @deepseek-ai/dsh-client-ui-directory-picker-native
+frames captured: 1
+frame dur 448 blocking 350 scripts 1
+   {"url":"http://127.0.0.1:53190/busy.js","pos":0,"fn":"","inv":"classic-script","dur":400.1}
+```
+
+The reconstructed segment table (offsets in UTF-16 code units, `prepareComboSource(part)`
++ `;\n` per part in URL order):
+
+```
+[       0,   109282)  @deepseek-ai/dsh-client-ui-deliverables
+[  109282,   478023)  @eddyskywalker/dsh-chatgpt-subscription
+[  478023,   488290)  dsh-desktop-bridge
+[  488290,   680615)  @wxg-prc-cpg/browser-skill-dsh-plugin
+[  680615,   938777)  dsh-chat-import
+[  938777,  1563980)  dshmarket
+[ 1563980,  1616832)  @deepseek-ai/dsh-typert-registry
+[ 1616832,  1676208)  @deepseek-ai/dsh-client-connection
+[ 1676208,  2221303)  dsh-context
+[ 2221303,  3254153)  dsh-claude-style
+[ 3254153,  3274659)  @deepseek-ai/dsh-api-workspace-controller
+[ 3274659,  3525899)  dsh-cost-meter
+[ 3525899,  3670113)  @deepseek-ai/dsh-api-session-controller
+[ 3670113,  3673108)  @deepseek-ai/dsh-client-ui-directory-picker-native
+total bytes: 3673108
+```
+
+**Conclusions:**
+- On an http origin, same-origin classic scripts appear in `scripts` with URL, char position,
+  invoker kind and durations — the attribution the design needs. `dsh web` is an ordinary http
+  origin, so the desktop window is the only blind spot.
+- The reconstruction executes exactly like the served combo: all 14 bundles register in URL
+  order under a queue stub, which also confirms no part throws before `dsh-claude-style`
+  (segment 10 of 14) executes.
+
+### 17c. Second capture on the desktop window, with a discriminating diagnostic
+
+A second capture ran in the same desktop window through real streamed answers (the full JSON is in
+the session archive; summary computed in-page):
+
+```
+DIAG {"frames":525,"withScripts":0,"maxBlocking":"410.4","iframes":0,
+      "origin":"dsh-app://app","probeFrameScripts":0,"probeFirstURL":null}
+```
+
+`probeFrameScripts` comes from a fresh 300 ms busy loop executed in the page's main world with the
+observer already attached: the frame it produced reported zero scripts, like the 525 streaming
+frames before it. `iframes: 0` rules out nested browsing contexts as the cause, and the streaming
+frames rule out devtools-injection artifacts (the page's own bundle code never appears either).
+
+**Conclusions:**
+- The suppression on `dsh-app://` is total and reproducible: two independent captures (375 + 525
+  frames, blocking up to 410 ms during real streaming) and two forced busy loops all report empty
+  `scripts`. The desktop window shows the correlation fallback, which the panel renders whenever
+  the resolved row set is empty.
+- The real `dsh web` http GUI could not be exercised in this environment: the two running
+  instances require startup tokens that live in their starters' consoles. `probes/23-loaf-attribution.mjs`
+  is the ready-made verification for any host where a token-bearing URL is available; given 17b
+  (plain http attribution works in the same Chrome binary) the expected outcome is that `dsh web`
+  attributes and the desktop window does not.
+
+## Evidence 18: the scheduler probe resolves positions on the desktop window
+
+The desktop jank probe (docs/design-desktop-jank-attribution.md) answers the question 17a-17c left
+open: on `dsh-app://`, where long animation frames carry no `scripts`, a captured stack still names
+the plugin. Measured on the live desktop window (DSH Desktop 0.1.7-rc.2, Electron 44,
+Chrome 152.0.7977.54) with the probe installed at page load.
+
+### 18a. The self-test caught a real defect on its first live run
+
+The probe's self-test captures one stack from `dsh-perf-lens/client.js` at install time and ships
+that raw position in every report; the host resolves it with the same code path as every other site
+and requires the owner to be `self`. The first live run answered:
+
+```
+schedule.contract = "mismatch"
+schedule.rows = [ { owner: "unresolved", scheduledMs: 88, calls: 802, maxMs: 1.1 } ]
+latest.schedule.selfTest = { url: "plugins/??...,dsh-perf-lens/client.js,@deepseek-ai/...&rev=5e4a42cb882a",
+                             line: 123526, column: 16 }
+```
+
+Two independent defects were behind it.
+
+**The manifest was looked for in the wrong directory.** The loader anchors `baseUrl` at the resolved
+ENTRY directory (`.../dsh-client-ui-open-in-app/lib/`, confirmed in the host's own
+`/api-perf/diagnostics` owner rules), while `createClientSourceReader` read `package.json` from that
+directory. Every part was therefore unreadable and the whole 58-part row collapsed into one unknown
+segment. Walking up from the entry directory to the first manifest whose `name` matches the plugin
+fixed it; the walk is required, not defensive, because the entry directory is a package's `lib/`.
+(Asar-packed harness packages are readable from the host process: verified directly against
+`resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-client-ui-open-in-app/package.json`.)
+
+**The probe's own construct trap was not recognized as its own.** After the reader fix the contract
+still answered `mismatch` with a single row owned by `self`. V8 renders a Proxy trap as a qualified
+method frame (`at Object.construct (...)`), and the own-frame filter compared the whole name against
+`{ apply, construct, ... }`, so the first `plugins/` frame it met was the probe's own trap and every
+construction attributed to perf-lens. Parsing the frame name and comparing its last dotted segment
+fixed it.
+
+### 18b. After both fixes, real plugins attribute
+
+With the probe installed at page load and a synthetic DOM-churn storm driving the page, the host
+resolved the report to:
+
+```
+schedule.contract = "ok"
+schedule.rows = [
+  { owner: "plugin:dsh-claude-style",                    scheduledMs: 60.5, calls: 365, maxMs: 0.7 },
+  { owner: "self",                                       scheduledMs: 42.6, calls: 801, maxMs: 0.6 },
+  { owner: "plugin:dshmarket",                           scheduledMs:  1.2, calls: 182, maxMs: 0.1 },
+  { owner: "plugin:dsh-desktop-bridge",                  scheduledMs:  0.8, calls: 184, maxMs: 0.2 },
+  { owner: "plugin:@eddyskywalker/dsh-chatgpt-subscription", scheduledMs: 0, calls: 1, maxMs: 0 },
+]
+latest.schedule.selfTest = { url: "plugins/??...,dsh-perf-lens/client.js,@deepseek-ai/...&rev=1dd0aff2c9a9",
+                             line: 1690, column: 16 }
+```
+
+The position at line 1690 resolves to `self` through the byte-exact segment table built from the
+58-part combo, and the other rows are the plugins' own registration sites in the same table. This is
+the end-to-end proof that the origin supports per-plugin attribution from a captured stack. The
+`self` row is the probe's own reporter tick, seen and charged to itself as design §3.8 requires;
+its share was 2.3% of the window's CPU against the 15% warning threshold.
+
+### 18c. What the measurement does and does not support
+
+The synthetic storm is not the streaming scenario the acceptance criteria describe, so what is proven
+is the *mechanism*, not a production load profile: positions resolve, real plugins attribute, the
+self-test gates the table, and the probe's own cost stays inside budget. Two runs under the same
+storm disagreed on which plugin held the largest share (60.5 ms `dsh-claude-style` in one, sub-ms
+rows in the next), which is expected when the driven work is artificial and the real scheduling
+happened at startup.
+
+A plain sample of consecutive vitals windows, with no synthetic work driven at all, still carried
+plugin and harness rows as the page was in ordinary use:
+
+```
+window A  harness:@deepseek-ai/dsh-api-session-controller  0.2 ms / 380 calls
+window B  harness:@deepseek-ai/dsh-api-session-controller  9.9 ms / 358 calls
+          plugin:@wxg-prc-cpg/browser-skill-dsh-plugin     0.0 ms /   9 calls
+window C  plugin:dsh-desktop-bridge                        0.2 ms /   1 call
+```
+
+Every row in those windows came from callbacks the plugins themselves re-register as work arrives
+(a 380-call site in the session controller is a poll, not a one-off), which is the population this
+feature exists to rank. The figures are small in these windows because the page was idle between
+tokens; the columns are what the acceptance criteria require, and the ranking is what a heavier
+stream would exercise.
+
+The switch therefore reloads and remembers. The installed plugins register during their own
+`apply()`, so a probe enabled after load sees nothing until the page reloads with the choice already
+stored; `apply()` now installs from that stored choice before the other plugins run. An idle page
+after such a reload reports only perf-lens's reporting tick, which is the honest reading: nothing
+else is scheduling.
+
+**Conclusions:**
+- Attribution from a captured stack works on `dsh-app://`. The mechanism needs no Document-Policy
+  change, no debugger port, and no engine patch; positions resolve through the same segment table the
+  LoAF path already builds, now extended with a line-start index.
+- The self-test is load-bearing, not ceremony: it found two real defects on its first live runs, and
+  the panel withheld the rows both times instead of publishing a wrong table.
+- The columns are registrar-scoped by construction. A row means "the page spent this long inside
+  callbacks registered at this position", never "this plugin caused the jank", and the panel and
+  README both say so.

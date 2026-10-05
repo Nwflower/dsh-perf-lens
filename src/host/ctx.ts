@@ -11,6 +11,12 @@ export interface LoaderEntryLike {
   readonly id: string
   readonly options: { readonly name: string }
   readonly parent: { readonly tree: { readonly ctx: { readonly baseUrl?: string | undefined } } }
+  /**
+   * The entry's cordis fiber. Used to attribute facts that carry no path — the
+   * event listeners the plugin registered — to the same owner key attribution
+   * derives from frame URLs. Absent for an entry that never activated.
+   */
+  readonly fiber?: unknown
 }
 
 /** Plugin inventory service. */

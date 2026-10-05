@@ -15,25 +15,79 @@
 // thousands of pixels below the fold.
 
 import { useEffect, useRef, useState } from 'react'
-import type { Hotspot, PerfRange, PerfSnapshot, PerfStats, PerfTrend, VitalsView } from '../shared/contract'
+import type { Hotspot, JankRow, PerfRange, PerfSnapshot, PerfStats, PerfTrend, SampleMode, ScheduleRow, VitalsView } from '../shared/contract'
 import { DEFAULTS } from '../shared/defaults'
+import { samplingOf } from '../shared/sampling'
 import { createPerfApi, type PerfApi } from './api'
 import { Composition } from './composition'
 import { PanelErrorBoundary } from './error-boundary'
 import { ControlBar } from './control-bar'
 import { GlobalBar } from './global-bar'
-import { subscribeLocale, t } from './i18n'
+import { displayHarnessPackage, displayOwner, subscribeLocale, t, type MessageKey } from './i18n'
 import { MetricsTable } from './metrics-table'
 import { PluginCards } from './plugin-cards'
+import { pageStorageOf, rememberProbeEnabled, scheduleProbe } from './schedule-probe'
 import { Scoreboard } from './scoreboard'
 import { hasAbsoluteSeries, TrendChart, type TrendMetric } from './trend-chart'
-import { startVitalsReporter } from './vitals'
+
+/** Fold harness sub-packages into one row for the jank table, like the board. */
+function foldJankRows(rows: readonly JankRow[]): JankRow[] {
+  const folded = new Map<string, { durationMs: number; forcedLayoutMs: number; count: number }>()
+  for (const row of rows) {
+    const owner = row.owner.startsWith('harness:') ? 'harness' : row.owner
+    const bucket = folded.get(owner) ?? { durationMs: 0, forcedLayoutMs: 0, count: 0 }
+    bucket.durationMs += row.durationMs
+    bucket.forcedLayoutMs += row.forcedLayoutMs
+    bucket.count += row.count
+    folded.set(owner, bucket)
+  }
+  return [...folded.entries()]
+    .map(([owner, row]) => ({ owner, ...row }))
+    .sort((a, b) => b.durationMs - a.durationMs)
+}
+
+/** Human label for one jank owner key, in the board's vocabulary. */
+function displayJankOwner(owner: string): string {
+  if (owner === 'unresolved') return t('jankUnresolved')
+  if (owner === 'other') return t('jankOther')
+  if (owner.startsWith('plugin:')) return owner.slice('plugin:'.length)
+  if (owner.startsWith('harness:')) return displayHarnessPackage(owner)
+  return displayOwner(owner)
+}
+
+/** Fold harness sub-packages into one row for the scheduler table, like the board. */
+function foldScheduleRows(rows: readonly ScheduleRow[]): ScheduleRow[] {
+  const folded = new Map<string, { scheduledMs: number; calls: number; maxMs: number }>()
+  for (const row of rows) {
+    const owner = row.owner.startsWith('harness:') ? 'harness' : row.owner
+    const bucket = folded.get(owner) ?? { scheduledMs: 0, calls: 0, maxMs: 0 }
+    bucket.scheduledMs += row.scheduledMs
+    bucket.calls += row.calls
+    bucket.maxMs = Math.max(bucket.maxMs, row.maxMs)
+    folded.set(owner, bucket)
+  }
+  return [...folded.entries()]
+    .map(([owner, row]) => ({ owner, ...row }))
+    .sort((a, b) => b.scheduledMs - a.scheduledMs)
+}
 
 /** Sparkline depth: enough to see a trend without retaining a profile. */
 const SERIES_LENGTH = 30
 /** Trend/scoreboard refresh cadence; JSONL aggregation is not free. */
 const TREND_REFRESH_MS = 15_000
 const RANGES: readonly PerfRange[] = ['1h', '24h', '7d']
+
+/**
+ * The chip beside the title reports the resolved sampling state, in the same
+ * vocabulary as the intensity segment: with three independent controls, "which
+ * buttons are lit" no longer answers "what is the sampler doing".
+ */
+const MODE_CHIP: Record<SampleMode, { readonly label: MessageKey; readonly hint: MessageKey }> = {
+  continuous: { label: 'high', hint: 'highHint' },
+  duty: { label: 'low', hint: 'lowHint' },
+  background: { label: 'background', hint: 'backgroundHint' },
+  paused: { label: 'stop', hint: 'stopHint' },
+}
 
 export interface PerfPanelProps {
   /** Injected by tests; the real panel builds the default client. */
@@ -52,10 +106,12 @@ export function PerfPanel({ api }: PerfPanelProps) {
   const [trend, setTrend] = useState<PerfTrend | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [deep, setDeep] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [hotspots, setHotspots] = useState<Readonly<Record<string, readonly Hotspot[]>>>({})
   const [vitals, setVitals] = useState<VitalsView | null>(null)
+  // The probe lives in this page, so its switch is local state; the report it
+  // produces travels through the host only so the panel can render resolved rows.
+  const [probeOn, setProbeOn] = useState(scheduleProbe.state.active)
   // Absolute is the default base: the share axis inflates on an idle host and
   // the chart is what people read the trend from (design-overnight-analyzer.md §6.5).
   const [trendMetric, setTrendMetric] = useState<TrendMetric>('absolute')
@@ -148,24 +204,21 @@ export function PerfPanel({ api }: PerfPanelProps) {
 
   useEffect(() => subscribeLocale(() => { setLocaleRevision(revision => revision + 1) }), [])
 
+  // The vitals reporter runs at the client entry (jank must be observed while
+  // the panel is closed, too); the panel only polls the ring the host keeps.
   useEffect(() => {
     let cancelled = false
-    client.vitals().then(
-      view => { if (!cancelled) setVitals(view) },
-      () => { /* vitals are an enhancement */ },
-    )
-    const stop = startVitalsReporter({
-      windowMs: DEFAULTS.vitalsWindowMs,
-      onReport: report => {
-        void client.postVitals(report).then(
-          view => { if (!cancelled) setVitals(view) },
-          () => { /* a dropped report must not disturb the board */ },
-        )
-      },
-    })
+    const load = (): void => {
+      void client.vitals().then(
+        view => { if (!cancelled) setVitals(view) },
+        () => { /* vitals are an enhancement */ },
+      )
+    }
+    load()
+    const timer = setInterval(load, DEFAULTS.vitalsWindowMs)
     return () => {
       cancelled = true
-      stop()
+      clearInterval(timer)
     }
   }, [client])
 
@@ -179,7 +232,8 @@ export function PerfPanel({ api }: PerfPanelProps) {
       next.add(moduleName)
       return next
     })
-    // Fetch lazily; frame-level data is only available after a deep-mode window.
+    // Fetch lazily; frame-level data is only available after a window collected
+    // with memory sampling on.
     if (hotspots[moduleName] === undefined) {
       void client.hotspots(moduleName).then(
         response => { if (response.hotspots !== null) setHotspots(previous => ({ ...previous, [moduleName]: response.hotspots ?? [] })) },
@@ -207,47 +261,68 @@ export function PerfPanel({ api }: PerfPanelProps) {
     )
   }
 
-  const modeLabel = snapshot.mode === 'continuous'
-    ? t('continuous')
-    : snapshot.mode === 'background'
-      ? t('background')
-      : snapshot.mode === 'paused' ? t('paused') : t('duty')
-  // The chip names the active tier; its hint says what that tier is doing, so a
-  // reader does not have to infer it from which button looks lit.
-  const modeHint = snapshot.mode === 'continuous'
-    ? t('continuousHint')
-    : snapshot.mode === 'background'
-      ? t('backgroundHint')
-      : snapshot.mode === 'paused' ? t('pausedHint') : t('dutyHint')
+  // The controls render from what the host reports, not from local state: a page
+  // reload (or a second tab) used to show every switch off while the host was
+  // still sampling. `samplingOf` also covers a host too old to send the config.
+  const sampling = samplingOf(snapshot)
+  // A host that reports no config predates the three-block controls, so it also
+  // does not know the fields they send: the buttons would look live and do
+  // nothing. Say so instead of failing silently.
+  const hostSkewed = snapshot.sampling === undefined
+  // The chip is the resolved state: with three independent controls, "which
+  // buttons are lit" no longer answers "what is the sampler doing", and this is
+  // where the combination shows (stopped plus background sampling, for one).
+  const chip = MODE_CHIP[snapshot.mode]
 
   // An older host answers /trend without the absolute basis; hide the switch
   // rather than offering a basis the data cannot support.
   const absoluteAvailable = trend !== null && hasAbsoluteSeries(trend)
   const latest = vitals?.latest ?? null
   const janky = latest !== null && (latest.longTaskTotalMs >= DEFAULTS.jankLongTaskMs || latest.rafGapP95Ms >= DEFAULTS.jankRafGapMs)
+  const jank = vitals?.jank ?? null
+  const schedule = vitals?.schedule ?? null
+  // A mismatch means the table's offsets no longer describe the row the browser
+  // runs, so every row is suspect: the switch stays on (a code change fixes it)
+  // but the numbers are withheld.
+  const scheduleTrustworthy = schedule !== null && schedule.contract !== 'mismatch'
+  const toggleProbe = (): void => {
+    const next = !scheduleProbe.state.active
+    if (next) scheduleProbe.enable()
+    else scheduleProbe.disable()
+    // Remembered so the reload the switch asks for installs the probe before the
+    // plugins register; without this the only path to the intended state would be
+    // a manual on-then-reload cycle.
+    rememberProbeEnabled(pageStorageOf(), next)
+    setProbeOn(scheduleProbe.state.active)
+    // Turning it on is only half the job: the plugins already registered their
+    // callbacks with the unwrapped functions, so the intended state needs the
+    // load-time install. Reloading here removes the manual on-then-reload step
+    // the panel's hint used to ask for.
+    if (next) window.location.reload()
+  }
 
   return (
     <PanelErrorBoundary>
       <div className="pl-root">
         <div className="pl-head">
         <span className="pl-title">{t('title')}</span>
-        <span className={snapshot.mode === 'continuous' ? 'pl-mode pl-mode-warn' : 'pl-mode'} title={modeHint}>{modeLabel}</span>
+        <span className={snapshot.mode === 'continuous' ? 'pl-mode pl-mode-warn' : 'pl-mode'} title={t(chip.hint)}>{t(chip.label)}</span>
         <div className="pl-controls">
           <ControlBar
-            mode={snapshot.mode}
-            deep={deep}
+            sampling={sampling}
             busy={busy}
-            onPause={() => { void send({ action: 'pause' }) }}
-            onResume={() => { void send({ action: 'resume' }) }}
-            onToggleContinuous={() => { void send({ mode: snapshot.mode === 'continuous' ? 'duty' : 'continuous' }) }}
-            onToggleBackground={() => { void send({ mode: snapshot.mode === 'background' ? 'duty' : 'background' }) }}
-            onToggleDeep={() => {
-              const next = !deep
-              setDeep(next)
+            unsupported={hostSkewed}
+            onIntensity={(intensity) => { void send({ intensity }) }}
+            onToggleBackground={() => { void send({ background: !sampling.background }) }}
+            onToggleMemory={() => {
+              const next = !sampling.memory
               if (!next) setHotspots({})
-              void send({ deep: next })
+              void send({ memory: next })
             }}
+            probeOn={probeOn}
+            onToggleProbe={toggleProbe}
           />
+          {hostSkewed ? <span className="pl-controls-warn">{t('hostSkew')}</span> : null}
         </div>
       </div>
 
@@ -269,7 +344,7 @@ export function PerfPanel({ api }: PerfPanelProps) {
               <span>{janky ? t('janky') : t('smooth')}</span>
               <span className="pl-vitals-dim" title={t('longTasksHint')}>{t('longTasks')} {latest.longTaskCount} / {latest.longTaskTotalMs.toFixed(1)}ms</span>
               <span className="pl-vitals-dim" title={t('rafGapHint')}>{t('rafGap')} {latest.rafGapP95Ms.toFixed(1)}ms</span>
-              <span className="pl-vitals-dim">{t('correlation')}</span>
+              {jank === null || jank.rows.length === 0 ? <span className="pl-vitals-dim">{t('correlation')}</span> : null}
             </>
           )}
         </div>
@@ -280,6 +355,71 @@ export function PerfPanel({ api }: PerfPanelProps) {
               .join('  ·  ')}
           </div>
         )}
+        {jank !== null && jank.rows.length > 0 ? (
+          <>
+            <table className="pl-table" title={t('jankTableHint')} style={{ marginTop: '8px' }}>
+              <thead>
+                <tr>
+                  <th className="pl-th pl-th-left">{t('jankOwner')}</th>
+                  <th className="pl-th">{t('jankScriptMs')}</th>
+                  <th className="pl-th">{t('jankLayoutMs')}</th>
+                  <th className="pl-th">{t('jankFrames')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {foldJankRows(jank.rows).map(row => (
+                  <tr key={row.owner}>
+                    <td className="pl-td pl-td-left pl-td-name">{displayJankOwner(row.owner)}</td>
+                    <td className="pl-td">{row.durationMs.toFixed(1)}</td>
+                    <td className="pl-td">{row.forcedLayoutMs.toFixed(1)}</td>
+                    <td className="pl-td">{row.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="pl-note" style={{ marginTop: '6px' }}>
+              {t('jankCoverage', { coverage: (jank.attributedShare * 100).toFixed(0) + '%' })}
+            </div>
+          </>
+        ) : null}
+        {schedule !== null ? (
+          <>
+            <div className="pl-note" style={{ marginTop: '10px', fontWeight: 600, color: 'inherit' }}>
+              {t('scheduleTitle')}
+            </div>
+            {!scheduleTrustworthy ? (
+              <div className="pl-note" style={{ marginTop: '4px' }}>{t('scheduleContractMismatch')}</div>
+            ) : schedule.rows.length === 0 ? (
+              <div className="pl-note" style={{ marginTop: '4px' }}>{t('probeOff')}</div>
+            ) : (
+              <>
+                <table className="pl-table" title={t('scheduleBasis')} style={{ marginTop: '6px' }}>
+                  <thead>
+                    <tr>
+                      <th className="pl-th pl-th-left">{t('scheduleOwner')}</th>
+                      <th className="pl-th">{t('scheduleMs')}</th>
+                      <th className="pl-th">{t('scheduleCalls')}</th>
+                      <th className="pl-th">{t('scheduleMax')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {foldScheduleRows(schedule.rows).map(row => (
+                      <tr key={row.owner}>
+                        <td className="pl-td pl-td-left pl-td-name">{displayJankOwner(row.owner)}</td>
+                        <td className="pl-td">{row.scheduledMs.toFixed(1)}</td>
+                        <td className="pl-td">{row.calls}</td>
+                        <td className="pl-td">{row.maxMs.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="pl-note" style={{ marginTop: '6px' }}>
+                  {t('scheduleCoverage', { coverage: (schedule.attributedShare * 100).toFixed(0) + '%' })}
+                </div>
+              </>
+            )}
+          </>
+        ) : null}
       </div>
 
       <div className="pl-card">

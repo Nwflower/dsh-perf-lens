@@ -5,8 +5,9 @@
 // plugin that caused a stall, so the panel correlates them with host CPU in
 // time and labels the result "correlation, not causation".
 
-import type { ClientVitals } from '../shared/contract'
+import type { ClientVitals, RawLoafScript, ScheduleReport } from '../shared/contract'
 import { percentile } from '../shared/math'
+import { aggregateLoaf, startLoafObserver } from './loaf'
 
 /**
  * A frame gap this large means the tab was hidden (rAF is paused in hidden
@@ -37,6 +38,15 @@ export interface VitalsReporterOptions {
   readonly onReport: (report: ClientVitals) => void
   /** Injectable clock for tests. */
   readonly now?: () => number
+  /**
+   * Scheduler probe window for the report.
+   *
+   * A supplier, not a fixed value: the panel's switch installs and removes the
+   * wrappers at any moment, and whether a report carries scheduler data must
+   * reflect the probe's state at flush time. Returns undefined when the probe is
+   * off, which leaves `schedule` absent from the report.
+   */
+  readonly schedule?: (windowMs: number) => ScheduleReport | undefined
 }
 
 /**
@@ -68,12 +78,23 @@ export function startVitalsReporter(options: VitalsReporterOptions): () => void 
     if (typeof requestAnimationFrame !== 'undefined') rafId = requestAnimationFrame(tick)
   }
   if (typeof requestAnimationFrame !== 'undefined') rafId = requestAnimationFrame(tick)
+  // LoAF script entries accumulate across the window and fold at flush time;
+  // an unsupported engine reports supported:false and the panel keeps the
+  // correlation fallback instead of a table of zeros.
+  const loafScripts: RawLoafScript[] = []
+  const loaf = startLoafObserver(scripts => { loafScripts.push(...scripts) })
   const timer = setInterval(() => {
-    options.onReport(summarizeVitals(longTasks.splice(0), rafGaps.splice(0), options.windowMs, now()))
+    const schedule = options.schedule?.(options.windowMs)
+    options.onReport({
+      ...summarizeVitals(longTasks.splice(0), rafGaps.splice(0), options.windowMs, now()),
+      loaf: aggregateLoaf(loafScripts.splice(0), loaf.supported),
+      ...(schedule === undefined ? {} : { schedule }),
+    })
   }, options.windowMs)
   return () => {
     clearInterval(timer)
     if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId)
     observer?.disconnect()
+    loaf.stop()
   }
 }

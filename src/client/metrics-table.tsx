@@ -19,7 +19,7 @@ import { formatBytes, formatMsPerSecond, formatOps, formatPercent } from './form
 import { displayHarnessPackage, displayOwner, t } from './i18n'
 import { Sparkline } from './sparkline'
 
-type SortKey = 'cpuShare' | 'liveHeapBytes' | 'fs' | 'allocBytesPerSec'
+type SortKey = 'cpuShare' | 'liveHeapBytes' | 'fs' | 'allocBytesPerSec' | 'listeners' | 'diskFootprintBytes'
 
 function sortValue(row: PluginMetricRow, key: SortKey): number {
   switch (key) {
@@ -27,6 +27,8 @@ function sortValue(row: PluginMetricRow, key: SortKey): number {
     case 'liveHeapBytes': return row.liveHeapBytes
     case 'allocBytesPerSec': return row.allocBytesPerSec
     case 'fs': return row.fsReadOps + row.fsWriteOps
+    case 'listeners': return row.listeners ?? 0
+    case 'diskFootprintBytes': return row.diskFootprintBytes
   }
 }
 
@@ -41,9 +43,10 @@ const GROUP_LABEL: Record<PluginGroupId, 'groupExternal' | 'groupHarness' | 'gro
 /**
  * Columns per row. There is no coverage column: coverage qualifies byte
  * counts, and the table shows only file operation counts, which are exact.
- * Per-plugin bytes are not measured (docs/design.md §13 #22).
+ * Per-plugin file BYTES are not measured (docs/design.md §13 #22); on-disk
+ * bytes are, and have their own column.
  */
-const COLUMNS = 9
+const COLUMNS = 11
 
 export interface MetricsTableProps {
   readonly rows: readonly PluginMetricRow[]
@@ -82,9 +85,6 @@ export function breakdownToRow(row: HarnessBreakdownRow): PluginMetricRow {
     fsReadBytes: 0,
     fsWriteBytes: 0,
     coverage: 0,
-    timers: 0,
-    listeners: 0,
-    handles: 0,
     diskFootprintBytes: 0,
   }
 }
@@ -161,6 +161,12 @@ export function MetricsTable({
           <td className="pl-td"><Sparkline values={series[row.moduleName] ?? []} /></td>
           <td className="pl-td">{formatBytes(row.liveHeapBytes)}</td>
           <td className="pl-td">{formatOps(row.fsReadOps, row.fsWriteOps)}</td>
+          <td className="pl-td" title={t('listenersHint')}>
+            {sub || row.listeners === undefined ? '—' : row.listeners}
+          </td>
+          <td className="pl-td" title={t('onDiskHint')}>
+            {sub ? '—' : formatBytes(row.diskFootprintBytes)}
+          </td>
           <td className="pl-td">{sub || row.allocBytesPerSec === 0 ? '—' : formatBytes(row.allocBytesPerSec) + '/s'}</td>
         </tr>
         {isOpen ? detailRow(row.moduleName, COLUMNS) : null}
@@ -181,6 +187,8 @@ export function MetricsTable({
             <th className="pl-th">{t('spark')}</th>
             <th className="pl-th pl-th-sort" title={t('liveHeapHint')} onClick={() => { setSortKey('liveHeapBytes') }}>{t('liveHeap')}{sortKey === 'liveHeapBytes' ? ' ▾' : ''}</th>
             {sortHeader('fs', t('disk'))}
+            {sortHeader('listeners', t('listeners'))}
+            {sortHeader('diskFootprintBytes', t('onDisk'))}
             {sortHeader('allocBytesPerSec', t('alloc'))}
           </tr>
         </thead>

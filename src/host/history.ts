@@ -66,11 +66,16 @@ export function rowHasActivity(row: PluginMetricRow): boolean {
     || row.fsWriteOps > 0
     || row.fsReadBytes > 0
     || row.fsWriteBytes > 0
-    || row.timers > 0
-    || row.listeners > 0
-    || row.handles > 0
-    || row.diskFootprintBytes > 0
 }
+
+/**
+ * The per-row live gauges added in 0.2.0 (timers, listeners, handles, disk
+ * footprint). They are state, not window cost: persisting them would make every
+ * plugin with one idle timer an "active" row in every record, multiplying the
+ * log by the plugin count for a figure no range aggregator reads. They are
+ * stripped before writing, so the log's shape is unchanged.
+ */
+export const LIVE_GAUGE_FIELDS = ['timers', 'listeners', 'handles', 'diskFootprintBytes'] as const
 
 /**
  * Serialize one window as a JSONL record.
@@ -90,7 +95,20 @@ export function serializeSnapshot(snapshot: PerfSnapshot): string {
   // tripping the contract's readonly modifiers.
   const persisted: Record<string, unknown> = { ...snapshot }
   delete persisted.harnessBreakdown
-  persisted.plugins = snapshot.plugins.filter(rowHasActivity)
+  // Derivable from `mode` (shared/sampling.ts configFromMode) and the log is
+  // size-sensitive: one record per window per day.
+  delete persisted.sampling
+  // Live gauges on their own slow timers: a window record cannot say when they
+  // were taken, so they are not persisted at all (see LIVE_GAUGE_FIELDS).
+  delete persisted.processTree
+  delete persisted.diskFootprint
+  persisted.plugins = snapshot.plugins
+    .filter(rowHasActivity)
+    .map(row => {
+      const copy: Record<string, unknown> = { ...row }
+      for (const field of LIVE_GAUGE_FIELDS) delete copy[field]
+      return copy
+    })
   return JSON.stringify(persisted)
 }
 

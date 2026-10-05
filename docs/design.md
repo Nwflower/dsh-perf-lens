@@ -81,7 +81,7 @@ src/
     trend-chart.tsx        // multi-plugin CPU trend, hides sub-threshold plugins
     scoreboard.tsx         // cumulative-cost ranking (avg / p95 / peak / estimate)
     metrics-table.tsx      // grouped, sortable per-plugin table with folds
-    control-bar.tsx        // pause / continuous / background / deep controls
+    control-bar.tsx        // intensity segment + background / memory switches
     sparkline.tsx          // inline SVG sparkline
     vitals.ts              // long-task + rAF foreground reporter
     error-boundary.tsx     // keeps a render error from blanking the host page
@@ -205,13 +205,13 @@ needed: polling `/api-perf/snapshot` is enough, at an interval that follows the 
 
 Under the default duty cycle (sample 5s, sleep 30s or longer) the dashboard can feel frozen. So:
 
-- The control bar's **Continuous sampling** button sends `POST /api-perf/control
-  { mode: 'continuous' }`: the host drops the sleep to 0 and shortens the window (2s by default),
-  giving a task-manager feel with updates every couple of seconds. Clicking it again returns to
-  `duty`.
+- The control bar's **High** tier sends `POST /api-perf/control { intensity: 'high' }`: the host drops
+  the sleep to 0 and shortens the window (2s by default), giving a task-manager feel with updates
+  every couple of seconds. Selecting **Low** returns to the duty cycle.
 - Continuous mode has a **cost ceiling**: after `continuousMaxMs` (10 minutes by default) the host
-  falls back to the duty cycle on its own, so it cannot be left on by accident.
-- The header chip always shows the active mode. The cost is paid only while someone is looking —
+  demotes the tier to `low` on its own, so it cannot be left on by accident — and because the mode is
+  derived from the config, the segment shows the demotion instead of staying lit on "high".
+- The header chip always shows the resolved state. The cost is paid only while someone is looking —
   which is how the feasibility conclusion "deep sampling on demand" becomes a product feature.
 - *Planned:* switch to continuous automatically while the panel is visible and back when it is
   hidden, and show the remaining time before the automatic fallback.
@@ -292,14 +292,28 @@ Single source of truth for the types: `src/shared/contract.ts`. One row per plug
 | allocBytesPerSec | B/s | sampled estimate | heap sampling tree deltas |
 | fsReadOps / fsWriteOps | count | **exact** | async_hooks |
 | fsReadBytes / fsWriteBytes | B | **partial coverage** | planned: `ctx.fs` wrapper (with coverage); currently 0 |
-| timers / listeners / handles | count | exact | planned: cordis lifecycle wrappers; currently 0 |
-| diskFootprintBytes | B | **exact** | planned: directory scan; currently 0 |
+| listeners | count | **exact** | the cordis event registry: every stored hook carries the context that registered it, so the owning fiber identifies the plugin. No hook, no wrapping, no patch |
+| timers / handles | count | **not measured** | the only mechanism is an always-on `async_hooks` hook, measured at 2.3–2.6× on promise-heavy work ([evidence 15](evidence.md#evidence-15-an-always-on-async_hooks-hook-is-too-expensive-for-a-live-timer-gauge)); the fields stay absent so the panel shows a gap, never a false zero |
+| diskFootprintBytes | B | **exact** | a budgeted directory walk of `$DSH_HOME`, mapped to owners by the same longest-prefix index attribution uses; live-only, never persisted |
 | fiberPhase | enum | exact | ctx.loader |
 | coverage | % | — | required on every partially covered field |
 
 Plus one process row: rss / heapUsed / heapTotal / external / arrayBuffers / eventLoopLagP99Ms /
 gcPauseMs / fsOpsTotal (exact, process-wide) / sampleWindowMs / sampleCount / idleSamples /
-sampleIntervalMs / processCpuMs.
+sampleIntervalMs / processCpuMs / unexplainedCpuMs / activeResourceCounts.
+
+And three readings that are **gauges on their own clocks, not window sums** — they are attached to
+the snapshot rather than built into a window, and stripped before a record is persisted:
+
+| Reading | What it is | Clock |
+| --- | --- | --- |
+| `processTree` | the host's descendant processes: count, combined CPU as a share of one core, combined RSS | polled every 30s (a process-table read costs a spawn) |
+| `diskFootprint` | what the last on-disk scan covered, and how much of it resolved to an owner | every 10 min |
+| `activeResourceCounts` | process-wide async resources by type, from `process.getActiveResourcesInfo()` | per window (native, no hook) |
+
+**None of the three is attributed to a plugin**, and the UI must say so. `processTree` is what
+explains "the host is idle but the machine is busy"; `unexplainedCpuMs` is what explains "the shares
+do not add up to the process's CPU".
 
 **Idle must be kept apart from runtime.** The CPU profiler samples idle time as nodes with an empty
 URL and the function name `(idle)` (measured: 1715 of 1716 samples in an idle 3s window). Counting
@@ -325,6 +339,19 @@ figures and no coverage column (decision #22); the rules apply the day one is ad
 - When the unattributed share passes its threshold (default **15%**) the overview warns about it
   instead of showing it quietly.
 - The panel always states the current sampling mode, window length and sample count.
+
+Two blind spots are structural rather than partial, and each has a marker:
+
+- **Worker threads.** An `inspector.Session` opened in the host thread profiles that isolate only: a
+  worker thread contributed **0 frames** while the process denominator included its CPU
+  ([evidence 14](evidence.md#evidence-14-worker-threads-are-invisible-to-the-host-sampler)). Every
+  plugin share is therefore low whenever a worker runs, with nothing in the samples to say so. The
+  marker is `unexplainedCpuMs` (`processCpuMs − sampleCount × sampleIntervalMs`), shown once it
+  passes a fifth of the process's CPU, and never attributed to a plugin.
+- **Child processes.** Every shell command, terminal and language server runs outside the host, so a
+  host-only view reports an idle host on a saturated machine. The marker is the `processTree`
+  reading, presented as a separate, explicitly unattributed total. Attribution of a child to the
+  plugin that spawned it is not built (decision #3).
 
 ---
 
@@ -362,6 +389,17 @@ figures and no coverage column (decision #22); the rules apply the day one is ad
 - Continuous mode: `idleMs = 0`, 2s windows, and an automatic fallback after `continuousMaxMs`
   (10 minutes).
 - Background mode: 1000µs interval, 2s window, 120s sleep — a cheap always-on record.
+- **The controls are three blocks, and one profile comes out of them** (`src/shared/sampling.ts`): an
+  intensity tier (`paused` / `low` / `high`), a background switch, and a memory switch. The intensity
+  picks the foreground profile; the background switch decides what happens while the intensity is
+  `paused` (`background` when on, `paused` when off) and is inert at `low` and `high`, where there is
+  one sampling loop and the foreground already owns it; the memory switch adds heap sampling without
+  changing the mode. Resolving the combination in one pure function is what makes "what does this
+  combination actually run?" a unit test rather than an integration question.
+- The mode is **derived, never stored**: the Lens keeps the config and computes the mode from it, so
+  the panel cannot be shown a mode that disagrees with the controls it renders. Snapshots carry the
+  config (`PerfSnapshot.sampling`), which is how the controls survive a page reload; history strips
+  it, being derivable from `mode`.
 - Every switch **takes effect immediately**, and unloading the plugin stops sampling unconditionally
   (cordis effect disposer).
 - The state machine is fully tested with vitest fake timers and a mock inspector session, including
@@ -403,13 +441,13 @@ getting worse last week".
 | Route | Method | Content | Status |
 | --- | --- | --- | --- |
 | `/api-perf/snapshot` | GET | Current window (process row + plugin rows + unattributed/self shares + harness breakdown) | shipped |
-| `/api-perf/control` | POST | `{ action: 'pause' \| 'resume' }`, `{ mode: 'duty' \| 'continuous' \| 'background' }`, `{ deep: boolean }`; takes effect immediately | shipped |
+| `/api-perf/control` | POST | `{ intensity?: 'paused' \| 'low' \| 'high', background?: boolean, memory?: boolean }` — any subset; takes effect immediately and returns the updated snapshot | shipped |
 | `/api-perf/diagnostics` | GET | Sampler state, last error, owner rules and keys — for troubleshooting | shipped |
 | `/api-perf/history?plugin=&since=` | GET | Raw persisted windows (ring + JSONL) | shipped |
 | `/api-perf/stats?range=1h\|24h\|7d` | GET | Range aggregate per plugin: avg / peak / p95 / cumulative core-time / coverage | shipped |
 | `/api-perf/trend?range=1h\|24h\|7d` | GET | **Compact series** for the trend chart: bucket-averaged to ≤ 120 points, share and ms/s per plugin | shipped |
 | `/api-perf/hotspots?plugin=` | GET | A plugin's hot functions; deep mode only, in memory only | shipped |
-| `/api-perf/vitals` | GET / POST | Foreground jank reports; POST bodies are validated before entering an in-memory ring | shipped |
+| `/api-perf/vitals` | GET / POST | Foreground jank reports; POST bodies are validated, and BOTH the LoAF script entries and the scheduler probe's registration sites resolve to per-owner rows at record time (`jank` / `schedule`), everything stays in an in-memory ring | shipped |
 | `/api-perf/export` | GET | Report export (JSON / Markdown) | planned (Phase 2) |
 | `/api-perf/heap-snapshot` | POST | Take a heap snapshot to disk and return its path | planned (Phase 2) |
 
@@ -430,7 +468,7 @@ schema.
 | idleMs | 30000 | Duty-cycle sleep |
 | continuousWindowMs | 2000 | Continuous-mode window length |
 | continuousMaxMs | 600000 | Continuous mode falls back after this long |
-| heapSampling | off | off \| deep; deep mode turns on dual sampling |
+| heapSampling | off | off \| on; the panel's memory sampling switch turns on dual sampling |
 | history.persist | true | Write the JSONL log |
 | history.retentionDays | 14 | Days to keep |
 | history.maxBytes | 200MB | Total size cap |
@@ -461,7 +499,7 @@ embedded as is).
 | Cost composition: CPU ====stacked bar==== | Memory ====stacked bar====               |
 |   top 5 plugins + other plugins + unattributed + own overhead + idle/unsampled       |
 +--------------------------------------------------------------------------------------+
-| Foreground jank: ● smooth/janky  long tasks  frame gap p95  correlation ≠ causation  |
+| Foreground jank: ● smooth/janky  long tasks  frame gap p95  [correlation ≠ causation | per-plugin long-frame script table + coverage] |
 +--------------------------------------------------------------------------------------+
 | Top consumers: [up to 6 cards: name, current %, sparkline, core %, avg, peak, heap]  |
 +--------------------------------------------------------------------------------------+
@@ -490,7 +528,12 @@ controls; clicking it opens the main panel through `ctx.layout.selectPanel(PANEL
 - Sorted by `cpuShare` descending by default; memory, disk and allocation rate are also sortable.
 - No coverage column until a partially covered metric is shown (decision #22); file operation
   counts are exact and need none.
-- The header chip names the active sampling mode (continuous mode is highlighted).
+- The header chip names the sampling state the host resolved, in the same vocabulary as the intensity
+  segment (low / high / background / stop), because with three independent controls "which buttons are
+  lit" no longer answers "what is the sampler doing" — *stop + background on* is a case the buttons
+  alone cannot express. The high tier is highlighted.
+- The controls are an intensity segment, a divider, then the two extra-sampling switches, so the three
+  blocks read as three decisions rather than one five-way choice.
 - A full analysis page under `settings.section`: Phase 2.
 
 ---
@@ -522,8 +565,28 @@ Plugin inventory, process metrics, per-plugin CPU sampling, retained-heap sampli
 operation counts, **the dashboard (sidebar.panellist entry + main panel + continuous sampling +
 sparklines)**, `/api-perf/snapshot|control|history`, and **the JSONL log with history charts**.
 
-Still open from the v1 list: timer/listener/handle counts, the directory byte scan, `ctx.fs` byte
-wrapping and the SelfMonitor.
+Still open from the v1 list: timer/handle counts (rejected as unaffordable, decision #25), `ctx.fs`
+byte wrapping and the SelfMonitor.
+
+### 0.2.0 (shipped)
+
+Descendant process totals (decision #23), the unexplained-CPU residual (#24), per-plugin listener
+counts (#26), per-plugin on-disk footprint (#27), and process-wide active-resource counts. See
+[roadmap-proposals.md](roadmap-proposals.md) for the ordering rationale and
+[landscape-survey.md](landscape-survey.md) for what the neighbours do.
+
+### Unreleased
+
+Browser-side per-plugin jank attribution through the Long Animation Frames API (decisions #9
+revised and #28): LoAF script entries resolve to per-owner rows host-side, and the vitals reporter
+runs from the client entry so jank is observed while the panel is closed. Full design in
+[design-loaf-attribution.md](design-loaf-attribution.md).
+
+A page-side scheduler probe for the desktop window (decision #29), where the scheme withholds LoAF
+script attribution: it reports each registration site's callback count, total time and longest call,
+the host resolves line/column through the same segment tables, and an install-time self-test turns a
+changed concatenation rule into a withheld table rather than wrong rows. Full design in
+[design-desktop-jank-attribution.md](design-desktop-jank-attribution.md).
 
 ### Phase 2
 
@@ -533,9 +596,9 @@ against a known-good state).
 
 ### Phase 3 (opt-in, experimental)
 
-Byte-level disk I/O through a `node:fs` loader hook, child-process sampling (dsh-subprocess-local /
-node-pty / LSP) and renderer metrics. Off by default and labelled experimental. **v1 explicitly
-leaves child processes out.**
+Byte-level disk I/O through a `node:fs` loader hook, **attributing a descendant process to the plugin
+that spawned it** (item 1b; the totals ship in 0.2.0) and renderer metrics. Off by default and
+labelled experimental. **v1 explicitly leaves child-process attribution out.**
 
 ---
 
@@ -545,13 +608,13 @@ leaves child processes out.**
 | --- | --- | --- |
 | 1 | History retention | **JSONL on disk by default** (§7); only counts are persisted |
 | 2 | Add a `settings.section` page? | Phase 2; v1 uses sidebar.panellist + main, like the Plugins panel |
-| 3 | Child processes in v1? | **No**; v1 covers plugin frames inside the host process only |
+| 3 | Child processes in v1? | **Shown from 0.2.0, not attributed.** The overview publishes the descendant tree's count, combined CPU and RSS as a separate, explicitly unattributed total (a host-only view reported an idle host on a saturated machine). Charging a child to the plugin that spawned it is item 1b, still open |
 | 4 | Coverage / unattributed thresholds | 60% / 15% by default |
 | 5 | Baseline comparison | Phase 2 |
 | 6 | Live dashboard form | **v1**: sidebar.panellist entry + main dashboard + continuous sampling (§3) |
 | 7 | Panel location | **Same shape as the dsh 0.1.7 plugin panel**: sidebar.panellist + main + `ctx.layout.selectPanel` (needs dsh ≥ 0.1.7-alpha.1) |
 | 8 | What the ranking counts | Cumulative core-time **within sampled windows** (sum of `cpuSelfMs`), shown with the sampling coverage. Any extrapolation is labelled an estimate; nothing is scaled up silently |
-| 9 | Foreground jank attribution | The browser cannot attribute a long task to a plugin bundle, so the panel only shows its **time correlation** with host CPU and always says "correlation ≠ causation" |
+| 9 | Foreground jank attribution | **Revised.** The longtask premise ("the browser cannot attribute jank to a plugin bundle") is outdated: the Long Animation Frames API (Chromium 123+, present in the GUI) reports per-frame `scripts` entries with sourceURL, char position, invoker and forced-layout cost. LoAF script time is attributed per plugin (combo URLs resolve through deterministic segment tables, see [design-loaf-attribution.md](design-loaf-attribution.md)) and always ships with a coverage ratio. longtask counts stay unattributable; on engines without LoAF the panel falls back to the time-correlation view and still says "correlation ≠ causation". **Desktop-window caveat** (measured, evidence 17a): on the `dsh-app://` custom scheme Chromium withholds the `scripts` list entirely, so attribution is a `dsh web`-only feature and the desktop window keeps the fallback |
 | 10 | Persisting hot functions | **Never** (frame-level data, the §7 red line); in memory only, deep mode only, cleared when deep mode is turned off |
 | 11 | Source maps for hot functions | Not done; host-side third-party packages ship almost no maps, and the raw `functionName` + `file:line` is already usable |
 | 12 | Trend data source | **A dedicated compact `/api-perf/trend`**, not `/api-perf/history`: 24h of full snapshots measured 31.5MB per poll against 119KB for the compact series (259×), and bucket averaging keeps peaks |
@@ -565,3 +628,10 @@ leaves child processes out.**
 | 20 | Ranking length and estimate | The ranking lists only plugins with sampled CPU, top 10 by default with "show all". The whole-range estimate is hidden below 5% sampling coverage (`estimateMinCoverage`), where it would be a 20× or larger scale-up |
 | 21 | What one sample is worth | Each window charges its samples at the **achieved** interval (profile span / sample count, published as `global.sampleIntervalMs`), not the configured one. Charging at the configured 250µs understated every absolute figure about 2.2× on Windows ([evidence 13](evidence.md#evidence-13-cpu-time-must-be-charged-at-the-achieved-sample-interval)) |
 | 22 | Per-plugin bytes and the coverage column | **Not built for 0.1.0; the column is removed.** The only patch-free route to per-plugin bytes is wrapping the harness `ctx.fs` service, and only harness packages call it (the model file tools, workspace files, ssh, deliverables) — none of the 13 third-party plugins installed on the reference host does. The wrapper would mean intercepting a core service across every fs backend and resolving the calling plugin, and still show 0% coverage for every external plugin. The table shows exact operation counts instead, which need no coverage marker |
+| 23 | Descendant processes | **Polled, never per window, and never attributed.** A process-table read costs a spawn (PowerShell on Windows), so it runs on its own 30s timer and reports a CPU *rate* over the gap between two polls. `coverage` says how much of the delta was computable; the first poll reports count and RSS only, because a 0% rate with no baseline is a measurement of nothing. The poller's own child is excluded by name and parent, so the panel cannot see its own cost. Measured on the reference host: ~330ms of wall time per call, almost none of it the host's own CPU, plus a PowerShell start on the machine. The routes refresh it when the panel polls and the reading is older than 5s. **Polling means a miss window**: a child that starts and exits between polls is never seen, so this reading answers "is something long-lived running", not "what did the last command cost" |
+| 24 | Unexplained CPU | Published as `unexplainedCpuMs = max(0, processCpuMs − sampleCount × sampleIntervalMs)`. The two clocks differ (the platform CPU clock quantizes at ~15.6ms on Windows), so small residue is normal; the panel only flags it past 20% of the process's CPU. It is a marker for a blind spot, never a plugin's cost |
+| 25 | Per-plugin timers and handles | **Not built.** An always-on `async_hooks` hook measured 2.3–2.6× on promise churn and ~13µs per timer with a stack capture ([evidence 15](evidence.md#evidence-15-an-always-on-async_hooks-hook-is-too-expensive-for-a-live-timer-gauge)) — worse than the profilers the duty cycle exists to bound, and a window-scoped gauge would undercount every resource created between windows. The fields stay optional and absent; the panel shows the process-wide totals from `getActiveResourcesInfo()` instead |
+| 26 | Per-plugin listeners | **Built by reading the cordis event registry, not by wrapping.** `EventsService` stores each listener as a record carrying the context that registered it, so the owning fiber identifies the plugin exactly; nothing is wrapped and dispatch order, `this` binding and listener identity are untouched. A registry that cannot be read yields `null` and the column renders as a gap rather than zero |
+| 27 | On-disk footprint | **Exact, live-only, budgeted.** Roots are `$DSH_HOME` **plus every plugin's own resolved directory**, because a plugin installed with `link:` (or any symlink) lives outside the home and the walk never follows symlinks — the home alone reported 0 bytes for exactly the plugins a developer cares about. Directories are visited at most once, so a plugin inside the home is not counted twice. The walk stops at 200k entries or 4s and sets `truncated` when it does; an unreadable *root* also sets it, so a failed walk cannot read as "nothing on disk". The bytes are stripped before persistence: a plugin holding one idle timer's worth of disk would otherwise become an "active" row in every record |
+| 28 | Where the vitals reporter runs | **At the client entry, not on panel mount.** A reporter that starts with the panel never observes jank during ordinary chat use — the exact failure mode this feature answers. The reporter (one rAF tick plus two observers that fire only on real work) posts every window whether or not the panel is open; the panel merely polls the host's ring |
+| 29 | Jank on the desktop window | **A page-side scheduler probe.** The desktop window's scheme withholds LoAF `scripts` (decision 9's caveat) and Document Policy disables the in-page V8 profiler, so the probe wraps the page's registrars (rAF, timers, queueMicrotask, the three observer classes) and reports each invitation's **registration site**; the host resolves line/column through the same combo segment table, extended with line-start offsets ([design-desktop-jank-attribution.md](design-desktop-jank-attribution.md)). It is registrar-attributed and **sampled**: it says "the page spent N ms inside callbacks registered here", counts nested wrappers at each level, and cannot name the statement inside a callback. Off by default, installs at `apply()` from a remembered choice so it precedes plugin registration, and reloads once when switched on. A self-test (one position captured from this plugin's own bundle) turns a changed concatenation rule into a visible `mismatch` that withholds every row; it found a real reader defect on its first live run ([evidence 18](evidence.md#evidence-18-the-scheduler-probe-resolves-positions-on-the-desktop-window)) |

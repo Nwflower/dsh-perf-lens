@@ -36,7 +36,7 @@ function row(moduleName: string, overrides: Partial<PluginMetricRow> = {}): Plug
   return {
     moduleName, entryId: moduleName, fiberPhase: 'active', cpuShare: 0, cpuSelfMs: 0,
     liveHeapBytes: 0, allocBytesPerSec: 0, fsReadOps: 0, fsWriteOps: 0,
-    fsReadBytes: 0, fsWriteBytes: 0, coverage: 0, timers: 0, listeners: 0, handles: 0,
+    fsReadBytes: 0, fsWriteBytes: 0, coverage: 0, listeners: 0,
     diskFootprintBytes: 0,
     ...overrides,
   }
@@ -148,7 +148,34 @@ describe('snapshot records', () => {
   test('round-trips an active row without loss', () => {
     const active = row('active-plugin', { cpuShare: 0.25, cpuSelfMs: 7, fsReadOps: 3, liveHeapBytes: 99 })
     const parsed = parseSnapshot(serializeSnapshot({ ...snapshot(1), plugins: [active] }))
-    expect(parsed?.plugins).toEqual([active])
+    const persisted = parsed?.plugins[0]
+    expect(persisted?.moduleName).toBe('active-plugin')
+    expect(persisted?.cpuShare).toBe(0.25)
+    expect(persisted?.cpuSelfMs).toBe(7)
+    expect(persisted?.fsReadOps).toBe(3)
+    expect(persisted?.liveHeapBytes).toBe(99)
+    // The live gauges do not survive: they are state, not window cost.
+    expect(persisted).not.toHaveProperty('listeners')
+    expect(persisted).not.toHaveProperty('diskFootprintBytes')
+  })
+
+  test('live gauges are stripped: they are state, not window cost', () => {
+    // A listener, an on-disk byte count or a live timer describes the moment the
+    // window closed, not what the window cost. Persisting them would make every
+    // plugin holding one idle timer an "active" row in every record, so they are
+    // stripped and the log's shape stays what the range aggregators expect.
+    const value: PerfSnapshot = {
+      ...snapshot(1),
+      processTree: { at: 1, count: 3, rssBytes: 4096, cpuCoreShare: 2, intervalMs: 30_000, coverage: 1, top: [] },
+      diskFootprint: { scannedAt: 1, scannedFiles: 10, scannedBytes: 100, ownedBytes: 50, truncated: false },
+      plugins: [row('leaky-plugin', { listeners: 42, diskFootprintBytes: 8192 })],
+    }
+    const line = serializeSnapshot(value)
+    expect(line).not.toContain('processTree')
+    expect(line).not.toContain('diskFootprint')
+    expect(line).not.toContain('listeners')
+    // The row has no window cost, so it is not persisted at all.
+    expect(parseSnapshot(line)?.plugins).toEqual([])
   })
 
   test('ignores blank and malformed lines', () => {

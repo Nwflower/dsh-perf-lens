@@ -14,6 +14,13 @@ export interface MetricsDeps {
   readonly resourceUsage: () => { readonly fsRead: number; readonly fsWrite: number }
   /** process.cpuUsage: cumulative microseconds of user + system CPU. */
   readonly cpuUsage: () => { readonly user: number; readonly system: number }
+  /**
+   * Live async-resource types held by the process. `process.getActiveResourcesInfo`
+   * is native and needs no async_hooks hook, which is why this reading exists at
+   * all: a per-owner timer gauge would cost +123% on promise-heavy work
+   * (docs/evidence.md, evidence 15).
+   */
+  readonly activeResources: () => readonly string[]
   readonly now: () => number
 }
 
@@ -22,8 +29,16 @@ function defaultDeps(): MetricsDeps {
     memoryUsage: () => process.memoryUsage(),
     resourceUsage: () => process.resourceUsage(),
     cpuUsage: () => process.cpuUsage(),
+    activeResources: () => process.getActiveResourcesInfo(),
     now: () => Date.now(),
   }
+}
+
+/** Tally a list of resource type names into a count per type. */
+export function tallyResourceTypes(types: readonly string[]): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const type of types) counts[type] = (counts[type] ?? 0) + 1
+  return counts
 }
 
 /** Collects global metrics across a sampling window. */
@@ -97,6 +112,7 @@ export class GlobalMetrics {
       eventLoopLagP99Ms: Number.isFinite(lagP99Ns) ? lagP99Ns / 1e6 : 0,
       gcPauseMs,
       processCpuMs,
+      activeResourceCounts: tallyResourceTypes(this.#deps.activeResources()),
       fsOpsTotal,
       sampleWindowMs,
       sampleCount,

@@ -99,7 +99,7 @@ describe('copy review (plain language over profiler jargon)', () => {
   test('the terms a user cannot decode were replaced', () => {
     // Retired: 占空比 (electrical-engineering loan), 自身开销 (whose self?),
     // harness 内核 (it is a product, not a kernel), 存活堆 (terse), 未归属.
-    expect(t('duty')).toBe('间歇采样')
+    expect(t('low')).toBe('低采样')
     expect(t('self')).toBe('本插件开销')
     expect(t('harness')).toBe('harness 内置')
     expect(t('liveHeap')).toBe('存活对象')
@@ -123,7 +123,7 @@ describe('copy review (plain language over profiler jargon)', () => {
     const explained = [
       'rss', 'heap', 'lag', 'gc', 'window', 'activeSamples', 'idleShare',
       'coreShare', 'absolute', 'estimate', 'p95', 'longTasks', 'rafGap',
-      'unattributed', 'self', 'harness', 'deep', 'continuous', 'duty', 'liveHeap',
+      'unattributed', 'self', 'harness', 'stop', 'low', 'high', 'background', 'memory', 'liveHeap',
     ]
     for (const key of explained) {
       const hint = key + 'Hint'
@@ -136,21 +136,23 @@ describe('copy review (plain language over profiler jargon)', () => {
 })
 describe('sampling controls read as action + object', () => {
   test('no button is a bare mode adjective', () => {
-    // "连续" alone does not say what continues; the labels carry their object.
-    for (const key of ['pause', 'resume', 'continuous', 'background', 'deep'] as const) {
+    // "高" alone does not say what is high; the labels carry their object.
+    for (const key of ['stop', 'low', 'high', 'background', 'memory'] as const) {
       expect(DICT_ZH[key], key).toContain('采样')
       expect(DICT_EN[key], key).toContain('sampling')
     }
   })
 
-  test('every tier toggle explains the way back to the default', () => {
-    // Clicking an active tier returns to intermittent sampling; the hint must
-    // say so, otherwise the button looks like a one-way switch.
-    expect(DICT_ZH.continuousHint).toContain('回到间歇采样')
-    expect(DICT_ZH.backgroundHint).toContain('回到间歇采样')
-    expect(DICT_ZH.deepHint).toContain('再次点击关闭')
-    expect(DICT_EN.continuousHint).toContain('click again')
-    expect(DICT_EN.backgroundHint).toContain('click again')
-    expect(DICT_EN.deepHint).toContain('click again')
+  test('the three blocks say how they combine', () => {
+    // The intensity segment is a radio, so its tiers explain what they do
+    // rather than how to get back; the two switches are toggles, so they must
+    // say how to turn off, and background sampling must say when it applies —
+    // otherwise it looks broken while the foreground is running.
+    expect(DICT_ZH.highHint).toContain('自动回到低采样')
+    expect(DICT_EN.highHint).toContain('drops back to low')
+    expect(DICT_ZH.backgroundHint).toContain('停止')
+    expect(DICT_EN.backgroundHint).toContain('Stop')
+    expect(DICT_ZH.memoryHint).toContain('再次点击关闭')
+    expect(DICT_EN.memoryHint).toContain('click again')
   })
 })

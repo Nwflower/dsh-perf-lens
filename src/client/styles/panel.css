@@ -45,6 +45,8 @@
 .pl-mode-warn { color: var(--dsw-alias-state-warn-label, #b8821c); }
 .pl-controls { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pl-controls-hint { font-size: 11px; color: var(--dsw-alias-label-secondary, #646a73); }
+/* A control that cannot reach the host is a warning, not a hint. */
+.pl-controls-warn { font-size: 11px; color: var(--dsw-alias-state-warn-label, #b8821c); }
 
 /* Segmented toggle group (the dsh shell's own control idiom). */
 .pl-seg {
@@ -64,6 +66,14 @@
 .pl-seg-on, .pl-seg-on:hover {
   background: var(--dsw-alias-button-primary-fill, #3370ff);
   color: var(--dsw-alias-label-primary-foreground, #fff);
+}
+
+/* Separates the intensity tier from the two extra-sampling switches: they are
+   independent decisions, and without a rule the three groups read as one
+   five-way choice. */
+.pl-controls-divider {
+  width: 1px; height: 16px; flex: none;
+  background: var(--dsw-alias-border-l2, rgba(31, 35, 41, 0.1));
 }
 
 /* ---- cards ---- */

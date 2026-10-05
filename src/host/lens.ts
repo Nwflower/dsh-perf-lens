@@ -3,11 +3,14 @@
 //
 // The duty cycle exists because sampling is not free (docs/evidence.md,
 // evidence 8: both samplers at once cost +15% to +26% on a compute-bound load).
-// Continuous mode gives that saving up only while someone is watching the
-// panel, and continuousMaxMs ends it so it cannot be left on by accident.
+// The panel's three controls — intensity, background sampling, memory sampling —
+// are resolved into the single profile the loop runs by shared/sampling.ts.
+// The high tier gives that saving up only while someone is watching the panel,
+// and continuousMaxMs ends it so it cannot be left on by accident.
 
-import type { GlobalMetricRow, HarnessBreakdownRow, PerfDiagnostics, PerfSnapshot, PluginMetricRow, SampleMode } from '../shared/contract'
-import { DEFAULTS } from '../shared/defaults'
+import type { DiskFootprintReading, GlobalMetricRow, HarnessBreakdownRow, PerfDiagnostics, PerfSnapshot, PluginMetricRow, ProcessTreeReading, SampleMode, SamplingConfig } from '../shared/contract'
+import { DEFAULTS, DEFAULT_SAMPLING } from '../shared/defaults'
+import { effectiveMode } from '../shared/sampling'
 import { attributeFrameList, ownerKey, tallySamples, type OwnerIndex } from './attribute'
 import { correlateSamples, sampleTimesUs, type AsyncCorrelation, type AsyncWindowRecorder, type AsyncWindowSample } from './async-attribution'
 import type { HistoryStore } from './history'
@@ -42,7 +45,7 @@ export interface LensOptions {
   readonly sentinelWindowMs: number
   readonly sentinelIdleMs: number
   readonly sentinelActivityThreshold: number
-  /** Deep mode enables heap sampling on top of CPU sampling. */
+  /** Initial memory sampling (heap on top of CPU); the panel can change it. */
   readonly deep: boolean
   readonly heapIntervalBytes: number
   readonly persistHistory: boolean
@@ -84,6 +87,25 @@ export interface LensDeps {
   readonly plugins: () => readonly PluginFacts[]
   /** Current path-prefix owner index. */
   readonly ownerIndex: () => OwnerIndex
+  /**
+   * Registered event listeners per owner key (roadmap item 3). Returns null when
+   * the cordis event registry could not be read, in which case the column is
+   * left absent rather than reported as zero.
+   */
+  readonly listenerCounts?: () => ReadonlyMap<string, number> | null
+  /**
+   * Per-owner on-disk bytes from the latest footprint scan (roadmap item 4).
+   * Optional, and empty until the first scan completes.
+   */
+  readonly diskFootprint?: () => ReadonlyMap<string, number>
+  /** Metadata of the latest footprint scan, published on the snapshot. */
+  readonly diskFootprintReading?: () => DiskFootprintReading | null
+  /**
+   * The host's descendant process tree (roadmap item 1a). Read at snapshot time
+   * rather than per window: the tree is polled far more slowly than the host is
+   * sampled, so a window-scoped copy would only be staler.
+   */
+  readonly processTree?: () => ProcessTreeReading | null
   readonly clock?: LensClock
 }
 
@@ -180,6 +202,23 @@ export function collapseIoCounts(
   return out
 }
 
+/** Fold `harness:<subpackage>` keys into one `harness` key, merging the values. */
+export function collapseByHarness<T>(
+  counts: ReadonlyMap<string, T>,
+  merge: (left: T, right: T) => T,
+): Map<string, T> {
+  const out = new Map<string, T>()
+  for (const [key, value] of counts) {
+    const target = key.startsWith('harness:') ? 'harness' : key
+    const existing = out.get(target)
+    out.set(target, existing === undefined ? value : merge(existing, value))
+  }
+  return out
+}
+
+const EMPTY_LISTENERS: ReadonlyMap<string, number> = new Map()
+const EMPTY_BYTES: ReadonlyMap<string, number> = new Map()
+
 /**
  * Whether a continuous-mode budget has run out. Continuous mode must never be
  * left on by accident (design risk table), so the loop checks this every window
@@ -226,8 +265,12 @@ export function probesForActivity(
 export class Lens {
   readonly #deps: LensDeps
   readonly #options: LensOptions
-  #mode: SampleMode = 'duty'
-  #deep: boolean
+  /**
+   * The three control blocks in force. `mode` is derived from them rather than
+   * stored, so the panel can never see a mode that disagrees with the controls
+   * it is rendering.
+   */
+  #sampling: SamplingConfig
   #running = false
   #generation = 0
   #continuousSince = 0
@@ -245,13 +288,16 @@ export class Lens {
   constructor(deps: LensDeps, options: LensOptions = DEFAULT_LENS_OPTIONS) {
     this.#deps = deps
     this.#options = options
-    this.#deep = options.deep
+    this.#sampling = { ...DEFAULT_SAMPLING, memory: options.deep }
     this.#last = {
       windowStartedAt: 0, mode: 'duty', global: zeroGlobal(), plugins: [], unattributedShare: 0, selfShare: 0,
     }
   }
 
-  get mode(): SampleMode { return this.#mode }
+  /** The mode the loop runs: the three control blocks resolved to one profile. */
+  get mode(): SampleMode { return effectiveMode(this.#sampling) }
+  /** The control blocks in force, for the panel's controls. */
+  get sampling(): SamplingConfig { return this.#sampling }
   get running(): boolean { return this.#running }
   get options(): LensOptions { return this.#options }
 
@@ -269,22 +315,41 @@ export class Lens {
     this.#generation += 1
   }
 
-  /** Switch mode immediately; entering continuous mode starts its budget. */
-  setMode(mode: SampleMode): void {
-    this.#mode = mode
-    if (mode === 'continuous') this.#continuousSince = this.#clock().now()
+  /**
+   * Apply a control change. Only the fields given change, so the panel can send
+   * one block at a time, and entering the high tier restarts its time budget.
+   */
+  setSampling(next: Partial<SamplingConfig>): void {
+    const merged: SamplingConfig = { ...this.#sampling, ...next }
+    // Entering high (re)starts the budget; leaving it clears the deadline so a
+    // later entry cannot inherit a stale one.
+    if (merged.intensity === 'high' && this.#sampling.intensity !== 'high') {
+      this.#continuousSince = this.#clock().now()
+    }
+    this.#sampling = merged
     // Controls must take effect now, not after the current idle sleep: without
-    // this, switching to continuous would appear dead for up to idleMs.
+    // this, switching to high would appear dead for up to idleMs.
     this.#wake?.()
   }
 
-  /** Update deep mode for the next window. */
-  setDeep(deep: boolean): void {
-    this.#deep = deep
-    this.#wake?.()
+  /**
+   * The last window, with the live control state overlaid. A control change has
+   * to be visible to the panel at once, but the window itself is only rebuilt
+   * when one closes — up to two minutes apart in background mode.
+   */
+  snapshot(): PerfSnapshot {
+    const base = { ...this.#last, mode: this.mode, sampling: { ...this.#sampling } }
+    // The tree and footprint readings are gauges on their own slow timers, so
+    // they are attached here rather than baked into the window: a control change
+    // or a fresh poll must be visible without waiting for the next window.
+    const processTree = this.#deps.processTree?.()
+    const diskFootprint = this.#deps.diskFootprintReading?.()
+    return {
+      ...base,
+      ...(processTree === null || processTree === undefined ? {} : { processTree }),
+      ...(diskFootprint === null || diskFootprint === undefined ? {} : { diskFootprint }),
+    }
   }
-
-  snapshot(): PerfSnapshot { return this.#last }
 
   /**
    * Attribution and health facts for troubleshooting. Exists because the duty
@@ -300,6 +365,16 @@ export class Lens {
     } catch {
       ownerRules = []
     }
+    let listenerRegistryReadable = false
+    try {
+      // `?.()` yields undefined when the collector is absent, which is "not
+      // measured" exactly like an explicit null.
+      listenerRegistryReadable = (this.#deps.listenerCounts?.() ?? null) !== null
+    } catch {
+      listenerRegistryReadable = false
+    }
+    const tree = this.#deps.processTree?.() ?? null
+    const disk = this.#deps.diskFootprintReading?.() ?? null
     return {
       lastError: this.#lastError,
       windowStartedAt: this.#last.windowStartedAt,
@@ -308,13 +383,31 @@ export class Lens {
       ownerRules,
       asyncWindowedSamples: this.#lastAsyncWindowed,
       asyncReattributedSamples: this.#lastAsyncReattributed,
+      // Health of the 0.2.0 collectors. Without these, "the host has no child
+      // processes" and "the process table cannot be read here" look identical
+      // from the outside, which is the failure mode diagnostics exist to remove.
+      processTree: {
+        available: tree !== null,
+        at: tree?.at ?? 0,
+        count: tree?.count ?? 0,
+        coverage: tree?.coverage ?? 0,
+      },
+      diskFootprint: disk === null
+        ? null
+        : {
+            scannedAt: disk.scannedAt,
+            scannedFiles: disk.scannedFiles,
+            ownedBytes: disk.ownedBytes,
+            truncated: disk.truncated,
+          },
+      listenersMeasured: listenerRegistryReadable,
     }
   }
 
   /** Run exactly one window and publish the snapshot. */
   async runWindow(): Promise<PerfSnapshot> {
     const clock = this.#clock()
-    const deep = this.#deep
+    const deep = this.#sampling.memory
     const windowMs = this.#windowMs()
     const startedAt = clock.now()
     // The async recorder is the most expensive instrumentation in the plugin,
@@ -339,7 +432,9 @@ export class Lens {
       const snapshot = this.#build(startedAt, windowMs, cpu, heap, asyncSample)
       this.#last = snapshot
       this.#deps.history.record(snapshot, this.#options.persistHistory)
-      return snapshot
+      // Return the same shape the routes serve: the gauges that live on their
+      // own timers are overlaid here too, so the two paths cannot disagree.
+      return this.snapshot()
     } finally {
       this.#deps.io.disable()
       asyncRecorder?.disable()
@@ -378,14 +473,15 @@ export class Lens {
 
   /** Window length for the active profile. */
   #windowMs(): number {
-    if (this.#mode === 'continuous') return this.#options.continuousWindowMs
-    if (this.#mode === 'background') return this.#options.backgroundWindowMs
+    const mode = this.mode
+    if (mode === 'continuous') return this.#options.continuousWindowMs
+    if (mode === 'background') return this.#options.backgroundWindowMs
     return this.#options.windowMs
   }
 
   /** CPU sampling interval for the active profile. */
   #cpuIntervalUs(): number {
-    return this.#mode === 'background' ? this.#options.backgroundCpuIntervalUs : this.#options.cpuIntervalUs
+    return this.mode === 'background' ? this.#options.backgroundCpuIntervalUs : this.#options.cpuIntervalUs
   }
 
   /**
@@ -419,7 +515,7 @@ export class Lens {
    * at once, exactly like the unprobed sleep.
    */
   async #sleepWithSentinel(ms: number): Promise<void> {
-    if (!probesForActivity(this.#mode, this.#options.sentinelEnabled, this.#lastIdleShare, this.#lastError)) {
+    if (!probesForActivity(this.mode, this.#options.sentinelEnabled, this.#lastIdleShare, this.#lastError)) {
       await this.#sleepInterruptible(ms)
       return
     }
@@ -474,30 +570,62 @@ export class Lens {
     // Shares are over active samples: idle wall time is not cost, and including
     // it made every plugin look like ~0% on an idle host.
     const activeSamples = Math.max(0, sampleCount - idleSamples)
-    const global = { ...this.#deps.metrics.read(windowMs, sampleCount), idleSamples, sampleIntervalMs: intervalMs }
+    const metricsRow = this.#deps.metrics.read(windowMs, sampleCount)
+    const global = {
+      ...metricsRow,
+      idleSamples,
+      sampleIntervalMs: intervalMs,
+      // The residual that keeps the shares honest: CPU the process actually
+      // burned minus the CPU the profile accounts for. Non-zero means work ran
+      // where the in-process sampler cannot see it (a worker thread, or native
+      // code off the main thread) — evidence 14. It is not a plugin's cost and
+      // must never be folded into one.
+      unexplainedCpuMs: Math.max(0, (metricsRow.processCpuMs ?? 0) - sampleCount * intervalMs),
+    }
     this.#lastIdleShare = sampleCount === 0 ? 0 : idleSamples / sampleCount
     const rows: PluginMetricRow[] = []
     const seen = new Set<string>()
-    for (const fact of this.#deps.plugins()) {
-      const key = `plugin:${fact.moduleName}`
-      seen.add(key)
-      rows.push(this.#row(key, fact.moduleName, fact.entryId, fact.fiberPhase, cpuCounts, heapCounts, ioPerOwner, activeSamples, intervalMs))
+    // Live gauges from their own collectors: registered listeners (item 3) and
+    // on-disk bytes (item 4). Both are state, not window sums. A collector that
+    // throws is treated as unmeasured: an optional extra must never cost the
+    // window, which is the thing the whole plugin exists to produce.
+    let listenerCounts: ReadonlyMap<string, number> | null = null
+    try {
+      listenerCounts = this.#deps.listenerCounts?.() ?? null
+    } catch {
+      listenerCounts = null
     }
+    const listeners = listenerCounts === null
+      ? null
+      : collapseByHarness(listenerCounts, (left, right) => left + right)
+    let footprintCounts: ReadonlyMap<string, number> = EMPTY_BYTES
+    try {
+      footprintCounts = this.#deps.diskFootprint?.() ?? EMPTY_BYTES
+    } catch {
+      footprintCounts = EMPTY_BYTES
+    }
+    const footprint = collapseByHarness(footprintCounts, (left, right) => left + right)
+    const push = (key: string, moduleName: string, entryId: string, fiberPhase: string): void => {
+      if (seen.has(key)) return
+      seen.add(key)
+      rows.push(this.#row(key, moduleName, entryId, fiberPhase, cpuCounts, heapCounts, ioPerOwner, listeners, footprint, activeSamples, intervalMs))
+    }
+    // Installed plugins first, so the board lists every one of them even when
+    // idle; then every other owner that showed any activity at all.
+    for (const fact of this.#deps.plugins()) push(`plugin:${fact.moduleName}`, fact.moduleName, fact.entryId, fact.fiberPhase)
     for (const key of cpuCounts.keys()) {
-      if (key === 'idle' || key.startsWith('plugin:') || seen.has(key)) continue
-      seen.add(key)
-      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples, intervalMs))
+      if (key === 'idle') continue
+      push(key, key, '', '')
     }
-    // Owners with file activity but no CPU samples still deserve a row.
-    for (const key of ioPerOwner.keys()) {
-      if (key.startsWith('plugin:') || seen.has(key)) continue
-      seen.add(key)
-      rows.push(this.#row(key, key, '', '', cpuCounts, heapCounts, ioPerOwner, activeSamples, intervalMs))
-    }
+    // An owner with file activity, a live handle or bytes on disk but no CPU
+    // samples still deserves a row.
+    for (const key of ioPerOwner.keys()) push(key, key, '', '')
+    for (const key of listeners?.keys() ?? EMPTY_LISTENERS.keys()) push(key, key, '', '')
+    for (const key of footprint.keys()) push(key, key, '', '')
     this.#lastOwnerKeys = [...rawCpuCounts.keys()]
     // Hot functions are a deep-mode extra and frame-level data: they go to the
     // in-memory store only, never into the snapshot that history persists.
-    if (this.#deep && cpu !== null) {
+    if (this.#sampling.memory && cpu !== null) {
       this.#deps.hotspots?.replace(
         aggregateHotspots(cpu.samples, cpu.nodes, index, intervalMs, undefined, asyncCorrelation.override),
       )
@@ -507,7 +635,8 @@ export class Lens {
     const denominator = activeSamples === 0 ? 1 : activeSamples
     return {
       windowStartedAt: startedAt,
-      mode: this.#mode,
+      mode: this.mode,
+      sampling: { ...this.#sampling },
       global,
       plugins: rows,
       unattributedShare: (cpuCounts.get('unattributed') ?? 0) / denominator,
@@ -584,11 +713,14 @@ export class Lens {
     cpuCounts: ReadonlyMap<string, number>,
     heapCounts: ReadonlyMap<string, number>,
     ioPerOwner: ReadonlyMap<string, { readonly read: number; readonly write: number }>,
+    listeners: ReadonlyMap<string, number> | null,
+    footprint: ReadonlyMap<string, number>,
     activeSamples: number,
     intervalMs: number,
   ): PluginMetricRow {
     const cpuSamples = cpuCounts.get(key) ?? 0
     const ioCounts = ioPerOwner.get(key)
+    const listenerCount = listeners?.get(key)
     return {
       moduleName,
       entryId,
@@ -602,16 +734,16 @@ export class Lens {
       fsReadBytes: 0,
       fsWriteBytes: 0,
       coverage: 0,
-      timers: 0,
-      listeners: 0,
-      handles: 0,
-      diskFootprintBytes: 0,
+      // Absent, not zero: neither has a mechanism that is cheap enough to be
+      // always true (evidence 15), and a false zero reads as "none".
+      listeners: listenerCount,
+      diskFootprintBytes: footprint.get(key) ?? 0,
     }
   }
 
   async #loop(generation: number): Promise<void> {
     while (this.#running && generation === this.#generation) {
-      if (this.#mode === 'paused') {
+      if (this.mode === 'paused') {
         await this.#clock().sleep(500)
         continue
       }
@@ -624,14 +756,16 @@ export class Lens {
         this.#lastError = error instanceof Error ? error.message : String(error)
       }
       if (!this.#running || generation !== this.#generation) break
-      if (continuousExpired(this.#mode, this.#clock().now(), this.#continuousSince, this.#options.continuousMaxMs)) {
-        this.#mode = 'duty'
+      if (continuousExpired(this.mode, this.#clock().now(), this.#continuousSince, this.#options.continuousMaxMs)) {
+        // The high tier is a bounded boost, not a setting: drop back to low and
+        // let the panel's segment show it, rather than silently sampling on.
+        this.#sampling = { ...this.#sampling, intensity: 'low' }
       }
       // Always await, even for 0: in continuous mode a window that throws
       // synchronously would otherwise loop entirely on microtasks and starve
       // the host event loop (observed as dsh hanging). A macrotask yield per
       // iteration is the safety valve.
-      const nominal = nextIdleWait(this.#mode, this.#options.idleMs, this.#lastIdleShare, this.#options.backgroundIdleMs)
+      const nominal = nextIdleWait(this.mode, this.#options.idleMs, this.#lastIdleShare, this.#options.backgroundIdleMs)
       // After a failed window, never retry faster than 30s: a broken profiler or
       // owner index must not turn continuous mode into a hammering loop.
       const wait = this.#lastError === null ? nominal : Math.max(nominal, 30_000)

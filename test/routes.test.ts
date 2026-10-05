@@ -50,8 +50,8 @@ function harness() {
       range: '24h', since: 0, times: [], series: [], windowCount: 0,
     })),
     hotspots: vi.fn(() => null),
-    vitals: vi.fn(() => ({ latest: null, recent: [] })),
-    recordVitals: vi.fn(() => ({ latest: null, recent: [] })),
+    vitals: vi.fn(() => ({ latest: null, recent: [], jank: null, schedule: null })),
+    recordVitals: vi.fn(() => ({ latest: null, recent: [], jank: null, schedule: null })),
     diagnostics: vi.fn(() => ({
       lastError: null, windowStartedAt: 1, sampleCount: 9,
       ownerKeys: ['plugin:a'], ownerRules: [{ kind: 'plugin', name: 'a', prefix: '/a/' }],
@@ -89,8 +89,8 @@ describe('registerPerfRoutes', () => {
   test('control parses the body and forwards it', async () => {
     const h = harness()
     const { res } = fakeRes()
-    await h.handlers.get('/api-perf/control')?.(fakeReq('/api-perf/control', '{"action":"pause"}'), res)
-    expect(h.service.control).toHaveBeenCalledWith({ action: 'pause' })
+    await h.handlers.get('/api-perf/control')?.(fakeReq('/api-perf/control', '{"intensity":"paused","background":true}'), res)
+    expect(h.service.control).toHaveBeenCalledWith({ intensity: 'paused', background: true })
   })
 
   test('control answers 400 on a malformed body', async () => {
@@ -137,7 +137,7 @@ describe('registerPerfRoutes', () => {
     const h = harness()
     const { res, captured } = fakeRes()
     h.handlers.get('/api-perf/vitals')?.(fakeReq('/api-perf/vitals'), res)
-    expect(JSON.parse(captured.body)).toEqual({ latest: null, recent: [] })
+    expect(JSON.parse(captured.body)).toEqual({ latest: null, recent: [], jank: null, schedule: null })
 
     const body = JSON.stringify({ longTaskCount: 1, longTaskTotalMs: 60, rafGapP95Ms: 20, windowMs: 5000, at: 7 })
     const posted = fakeRes()

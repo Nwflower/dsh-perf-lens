@@ -1,3 +1,5 @@
+import type { SamplingConfig } from './contract'
+
 /**
  * Sampling and presentation defaults. There is no plugin configuration yet
  * (docs/design.md §9), so these are the values in effect.
@@ -77,12 +79,27 @@ export const DEFAULTS = {
   /** A p95 frame gap at or above this counts as jank. */
   jankRafGapMs: 50,
   /**
+   * A wrapped callback at or above this keeps one sample of where its body is
+   * defined (the desktop jank probe). Below it only the running totals are kept,
+   * which is what bounds the probe's memory and its report size.
+   */
+  hotCallbackMs: 2,
+  /** Slow-callback samples kept per window; the rest fold into slowDropped. */
+  slowSamplesPerWindow: 50,
+  /**
    * How many harness internal packages the snapshot keeps beside the folded
    * `harness` row. Enough to name the real consumers, few enough that the log
    * and the table do not grow with the package count.
    */
   harnessBreakdownLimit: 10,
 } as const
+
+/**
+ * Panel default: low-rate intermittent sampling, no background record, CPU
+ * only. The cheapest useful setting, because this plugin is installed to watch
+ * a host rather than to load one.
+ */
+export const DEFAULT_SAMPLING: SamplingConfig = { intensity: 'low', background: false, memory: false }
 
 /** Sidebar entry id and the matching main-panel key (dsh 0.1.7 plugin-panel pattern). */
 export const PANEL_ID = 'perf-lens'

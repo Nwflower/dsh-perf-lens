@@ -9,11 +9,13 @@ function makeDeps() {
     cpu: { user: 0, system: 0 },
     fsRead: 0,
     fsWrite: 0,
+    activeResources: [] as string[],
   }
   const deps: MetricsDeps = {
     memoryUsage: () => ({ rss: 1, heapUsed: 2, heapTotal: 3, external: 4, arrayBuffers: 5 }),
     resourceUsage: () => ({ fsRead: state.fsRead, fsWrite: state.fsWrite }),
     cpuUsage: () => ({ ...state.cpu }),
+    activeResources: () => state.activeResources,
     now: () => 0,
   }
   return { deps, state }

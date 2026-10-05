@@ -306,18 +306,32 @@ of misleading numbers** — the biggest product risk of this approach, larger th
    need process-level sampling of their own.
 5. **Sampling is statistics.** Short windows are noisy, so the panel must show the window length and
    the sample count.
+6. **Long Animation Frame attribution covers script execution only.** LoAF (Chromium 123+) names the
+   script and its forced style/layout cost; layout, paint and compositing no script forced stay in
+   the frame-level totals. Multi-plugin combo bundles resolve through deterministic segment offsets,
+   and the attributed share is always shown alongside. The DSH Desktop window (`dsh-app://`)
+   withholds the scripts list entirely (measured, evidence 17a), so this is a `dsh web`-only
+   capability.
 
 ---
 
 ## 7. Ecosystem survey
 
-There is **no comparable plugin** under the `dsh-plugin` topic:
+There is **no plugin that attributes host CPU, memory or disk cost to individual plugins**. The niche
+is empty.
 
-- `dsh-plugin-bench` is a **static quality score** (an eight-dimension scorecard) and does not
-  measure runtime cost;
-- the usage and cost meters track **model spend**, not plugin resource use.
+The reasoning was re-checked on 2026-09-24 and is stale as originally written: the `dsh-plugin` topic
+now holds ~16 000 repositories and a dozen adjacent performance plugins exist — machine-level monitors,
+static plugin scorecards, process-level OpenTelemetry / Pyroscope exporters
+(`dsh-runtime-observability`, `dsh-o11y-plugin`), a plugin-bisection tool
+(`dsh-performance-guard`), client-side per-plugin render attribution (`@linxin666/dsh-perf`) and
+per-plugin *data* attribution (`dsh-audit-log`). None of them crosses into per-plugin host resource
+cost, because that requires the inspector-based stack walk in §3.3.
 
-The niche is empty.
+The full market survey, the closest analogues in other ecosystems (spark, the VS Code extension-host
+profiler, Bukkit Timings, Chrome/Firefox per-extension accounting, continuous profilers), the
+published overhead figures and the borrow list live in
+[landscape-survey.md](landscape-survey.md).
 
 ---
 

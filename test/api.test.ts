@@ -25,11 +25,11 @@ describe('createPerfApi', () => {
   test('posts control bodies as JSON', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(SNAPSHOT))
     const api = createPerfApi(fetchImpl as unknown as typeof fetch)
-    await api.control({ action: 'pause', deep: true })
+    await api.control({ intensity: 'paused', memory: true })
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('/api-perf/control')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(String(init.body))).toEqual({ action: 'pause', deep: true })
+    expect(JSON.parse(String(init.body))).toEqual({ intensity: 'paused', memory: true })
   })
 
   test('encodes the history query', async () => {

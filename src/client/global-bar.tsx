@@ -54,6 +54,21 @@ export function GlobalBar({ snapshot }: GlobalBarProps) {
     { label: 'activeSamples', hint: 'activeSamplesHint', value: activeSamples + '/' + global.sampleCount },
     { label: 'idleShare', hint: 'idleShareHint', value: formatPercent(idleShare) },
   ]
+  // Descendant processes (roadmap item 1a). A separate total, on its own slow
+  // clock, and never attributed to a plugin: it exists to explain the gap
+  // between "the host is idle" and "the machine is busy".
+  const tree = snapshot.processTree
+  // Unexplained CPU (item 2a): the process burned it, the profile did not see
+  // it. Worth flagging once it is a fifth of the process's CPU.
+  const unexplained = global.unexplainedCpuMs
+  const unexplainedShare = unexplained !== undefined && processCpuMs !== undefined && processCpuMs >= CPU_CALIBRATION_FLOOR_MS
+    ? unexplained / processCpuMs
+    : null
+  // Process-wide async resources. No owner is available cheaply (evidence 15),
+  // so this is a process reading; its trend is what makes a leak visible.
+  const resourceEntries = Object.entries(global.activeResourceCounts ?? {})
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 3)
   return (
     <div className="pl-card">
       <div className="pl-card-title">{t('overview')}</div>
@@ -82,6 +97,24 @@ export function GlobalBar({ snapshot }: GlobalBarProps) {
           {t('unattributed')} {formatPercent(snapshot.unattributedShare)}{unattributedHigh ? ' ⚠' : ''}
         </span>
         <span title={t('selfHint')}>{t('self')} {formatPercent(snapshot.selfShare)}</span>
+        {tree === null || tree === undefined
+          ? <span className="pl-td-dim" title={t('processTreeHint')}>{t('processTree')} {t('processTreeNone')}</span>
+          : (
+            <span className={tree.cpuCoreShare >= 1 ? 'pl-chip-warn' : undefined} title={t('processTreeHint')}>
+              {t('processTree')} {tree.count} · {formatPercent(tree.cpuCoreShare)} · {formatBytes(tree.rssBytes)}
+              {tree.cpuCoreShare >= 1 ? ` ⚠ ${t('processTreeWarn')}` : ''}
+            </span>
+          )}
+        {unexplainedShare === null || unexplainedShare < 0.2 ? null : (
+          <span className="pl-chip-warn" title={t('unexplainedCpuHint')}>
+            {t('unexplainedCpu')} {formatPercent(unexplainedShare)} ⚠
+          </span>
+        )}
+        {resourceEntries.length === 0 ? null : (
+          <span title={t('activeResourcesHint')}>
+            {t('activeResources')} {resourceEntries.map(([type, count]) => `${type} ${count}`).join(' · ')}
+          </span>
+        )}
       </div>
     </div>
   )

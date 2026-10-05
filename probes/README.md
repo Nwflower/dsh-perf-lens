@@ -31,6 +31,10 @@ node 16-achieved-sample-rate.mjs          # configured interval vs the sampling 
 node 17-log-line-compaction.mjs            # share of all-zero rows in the JSONL and the slimmed size
 node 18-sentinel-cost.mjs                  # sampling budget added by the two-tier sentinel
 node 19-mechanism-c.mjs                    # can async_hooks windows re-attribute async work (mechanism C)?
+node 20-worker-thread-blindspot.mjs        # does a worker thread show up in a main-thread CPU profile?
+node 21-async-hooks-cost.mjs               # what an always-on async_hooks hook costs (read the trend)
+node 22-listener-registry.mjs              # per-plugin listener counts with no patch (needs @deepseek-ai/cordis)
+node 23-loaf-attribution.mjs --base http://127.0.0.1:3081   # live LoAF per-plugin jank rows + privacy grep (stream an answer while it polls)
 ```
 
 ## Inventory
@@ -56,6 +60,10 @@ node 19-mechanism-c.mjs                    # can async_hooks windows re-attribut
 | `17-log-line-compaction.mjs` | In the real JSONL only **4.0 of 218.6 rows per window** have activity; dropping all-zero rows takes a line from 67.9 KB to 1.5 KB (**−97.8%**) | [Evidence 10](../docs/evidence.md#evidence-10-all-zero-rows-made-up-98-of-the-log) |
 | `18-sentinel-cost.mjs` | Two-tier sentinel budget: a 1s probe is **98 samples** against **9222** for a 5s fine window; 11 probes per 120s backoff = **+11.7% sampling budget** | [Background analyzer §13.7](../docs/design-overnight-analyzer.md) |
 | `19-mechanism-c.mjs` | Mechanism C measured: in one profile the stack gives all 714 samples to harness, while async-window correlation hands **701** back to the plugin; V8's profile clock is monotonic since boot and must be rebased | [Evidence 11](../docs/evidence.md#evidence-11-mechanism-c-async-boundaries-is-attributable) |
+| `20-worker-thread-blindspot.mjs` | A worker thread is **invisible** to a main-thread CPU profile (0 frames) while the process denominator includes it (193–197% of one core); `process.report` cannot even detect a live worker | [Evidence 14](../docs/evidence.md#evidence-14-worker-threads-are-invisible-to-the-host-sampler) |
+| `21-async-hooks-cost.mjs` | An always-on async_hooks hook takes promise churn from 7–8ms to 18ms (2.3–2.6×); a stack capture per timer costs ~13µs, so a live per-plugin timer gauge is not affordable | [Evidence 15](../docs/evidence.md#evidence-15-an-always-on-async_hooks-hook-is-too-expensive-for-a-live-timer-gauge) |
+| `22-listener-registry.mjs` | The cordis event registry is readable and every stored hook carries the registering fiber, so per-plugin listener counts are exact with **no hook and no patch**; unmapped fibers are skipped, not guessed | [Evidence 16](../docs/evidence.md#evidence-16-per-plugin-listener-counts-need-no-patching) |
+| `23-loaf-attribution.mjs` | Live: during a streamed answer, resolved jank rows name the running plugins (LoAF `scripts` through combo segment tables); `--capture` resolves a raw page capture offline against the real published bundles | [Evidence 17](../docs/evidence.md#evidence-17-loaf-script-attribution--where-it-works-and-what-it-resolves) |
 
 ## Notes
 
